@@ -31,7 +31,6 @@ SHEET_HEADERS = ["Поставщик", "Номер счёта", "Дата счё
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
 app = Flask(__name__)
-debug_log = []
 
 _spreadsheet_id = SPREADSHEET_ID
 
@@ -243,17 +242,30 @@ def process_invoice(msg, file_bytes: bytes, file_type: str, filename: str = ""):
 
         print(f"🤖 AI вернул: {data}")
         rows = invoice_to_rows(data)
-        print(f"📋 Строк для записи: {len(rows)}")
+        print(f"📋 Строк для записи: {len(rows)}", flush=True)
         if not rows:
             set_reaction(msg, "❌")
+            bot.reply_to(msg, "⚠️ Позиции не найдены в счёте.")
             return
 
         write_rows_to_sheet(rows)
+        sid = get_or_create_spreadsheet()
         set_reaction(msg, "✅")
-        print("✅ Записано в таблицу")
+        supplier = data.get("supplier", "—")
+        inv_num = data.get("invoice_number", "—")
+        inv_date = data.get("invoice_date", "—")
+        bot.reply_to(
+            msg,
+            f"✅ Добавлено {len(rows)} позиций\n"
+            f"🏢 {supplier}\n"
+            f"📄 Счёт №{inv_num} от {inv_date}\n"
+            f"📊 https://docs.google.com/spreadsheets/d/{sid}",
+        )
+        print("✅ Записано в таблицу", flush=True)
     except Exception as e:
-        print(f"❌ Ошибка в process_invoice: {e}")
+        print(f"❌ Ошибка в process_invoice: {e}", flush=True)
         set_reaction(msg, "❌")
+        bot.reply_to(msg, f"❌ Ошибка: {e}")
 
 
 @bot.message_handler(content_types=["document"])
@@ -281,9 +293,7 @@ def on_photo(msg):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     json_data = flask_request.get_json()
-    debug_log.append(str(json_data)[:300])
-    if len(debug_log) > 20:
-        debug_log.pop(0)
+    print(f"📨 Update type: {list(json_data.keys()) if json_data else None}", flush=True)
     update = telebot.types.Update.de_json(json_data)
     bot.process_new_updates([update])
     return "ok", 200
@@ -291,7 +301,7 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "<br>".join(debug_log) or "No updates yet", 200
+    return "Invoice bot is running", 200
 
 
 if __name__ == "__main__":
