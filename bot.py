@@ -26,7 +26,7 @@ WEBHOOK_URL = os.environ["WEBHOOK_URL"]
 PORT = int(os.environ.get("PORT", 8080))
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
 
-SHEET_HEADERS = ["Поставщик", "Номер счёта", "Дата счёта", "Наименование", "Артикул/Описание", "Ед.изм.", "Кол-во", "Цена с НДС", "Сумма с НДС", "Дата добавления"]
+SHEET_HEADERS = ["№", "Поставщик", "Номер счёта", "Дата счёта", "Позиция в счете", "Наименование", "Артикул/Описание", "Ед.изм.", "Кол-во", "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете"]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
@@ -118,8 +118,9 @@ EXTRACT_PROMPT = """Ты парсер счетов-фактур и наклад�
   "supplier": "Название поставщика",
   "invoice_number": "Номер счёта",
   "invoice_date": "ДД.ММ.ГГГГ или пусто если нет",
+  "total_amount": 0.0,
   "items": [
-    {"name": "Наименование товара/услуги", "article": "артикул/тип/производитель или пусто", "unit": "ед.изм.", "quantity": 1, "price_with_vat": 0.0}
+    {"pos": 1, "name": "Наименование товара/услуги", "article": "артикул/тип/производитель или пусто", "unit": "ед.изм.", "quantity": 1, "price_with_vat": 0.0}
   ]
 }
 
@@ -127,7 +128,9 @@ EXTRACT_PROMPT = """Ты парсер счетов-фактур и наклад�
 - supplier: название компании-поставщика (кто выставил счёт)
 - invoice_number: номер счёта/накладной
 - invoice_date: дата выставления счёта
+- total_amount: итоговая сумма всего счёта с НДС
 - items: все позиции товаров/услуг из счёта
+- pos: номер позиции в счёте (1, 2, 3...)
 - name: наименование товара или услуги
 - article: артикул, тип, марка, производитель или любое доп. описание товара (если есть)
 - unit: шт, м, м2, м3, кг, л, компл, усл и т.п.
@@ -176,30 +179,34 @@ def parse_invoice_from_image(image_bytes: bytes, mime: str = "image/jpeg") -> di
     return json.loads(m.group())
 
 
-def invoice_to_rows(data: dict) -> list:
+def invoice_to_rows(data: dict, start_num: int = 1) -> list:
     today = datetime.now().strftime("%d.%m.%Y")
     supplier = data.get("supplier", "—")
     inv_num = data.get("invoice_number", "—")
     inv_date = data.get("invoice_date", "—")
+    total_amount = data.get("total_amount", 0) or 0
     rows = []
-    for item in data.get("items", []):
+    for i, item in enumerate(data.get("items", []), start=1):
         qty = item.get("quantity", 0) or 0
         price = item.get("price_with_vat", 0) or 0
         try:
-            total = round(float(qty) * float(price), 2)
+            line_total = round(float(qty) * float(price), 2)
         except Exception:
-            total = 0
+            line_total = 0
         rows.append([
+            start_num + i - 1,
             supplier,
             inv_num,
             inv_date,
+            item.get("pos", i),
             item.get("name", "—"),
             item.get("article", ""),
             item.get("unit", "—"),
             qty,
             price,
-            total,
+            line_total,
             today,
+            total_amount,
         ])
     return rows
 
