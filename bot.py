@@ -236,7 +236,7 @@ def parse_with_ai(text: str) -> dict:
                 model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": EXTRACT_PROMPT},
-                    {"role": "user", "content": f"Счёт:\n\n{text[:8000]}"},
+                    {"role": "user", "content": f"Счёт:\n\n{text[:4000]}"},
                 ],
                 max_tokens=2000,
                 temperature=0.1,
@@ -245,9 +245,9 @@ def parse_with_ai(text: str) -> dict:
             print(f"🤖 AI: {raw[:300]}", flush=True)
             return extract_json(raw)
         except Exception as e:
-            if "429" in str(e) and attempt < 2:
+            if ("429" in str(e) or "413" in str(e)) and attempt < 2:
                 wait = 30 * (attempt + 1)
-                print(f"⏳ Rate limit, жду {wait}с", flush=True)
+                print(f"⏳ Rate limit/size, жду {wait}с", flush=True)
                 time.sleep(wait)
             else:
                 raise
