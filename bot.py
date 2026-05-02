@@ -157,7 +157,7 @@ def extract_json(text: str) -> dict:
 
 def parse_invoice_from_text(text: str) -> dict:
     resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=[
             {"role": "system", "content": EXTRACT_PROMPT},
             {"role": "user", "content": f"Счёт:\n\n{text[:8000]}"},
