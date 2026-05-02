@@ -4,6 +4,7 @@ import json
 import re
 import base64
 import tempfile
+import time
 from datetime import datetime
 
 import requests
@@ -24,7 +25,7 @@ GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 GOOGLE_SHEETS_REFRESH_TOKEN = os.environ["GOOGLE_SHEETS_REFRESH_TOKEN"]
 WEBHOOK_URL = os.environ["WEBHOOK_URL"]
 PORT = int(os.environ.get("PORT", 8080))
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1tmuj1f2D2euUZlr-CXHzgkurRavF-MV8UxvjG3SIKDc")
 
 SHEET_HEADERS = ["№", "Поставщик", "Номер счёта", "Дата счёта", "Позиция в счете", "Наименование", "Артикул/Описание", "Ед.изм.", "Кол-во", "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете"]
 
@@ -156,18 +157,27 @@ def extract_json(text: str) -> dict:
 
 
 def parse_invoice_from_text(text: str) -> dict:
-    resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": EXTRACT_PROMPT},
-            {"role": "user", "content": f"Счёт:\n\n{text[:8000]}"},
-        ],
-        max_tokens=2000,
-        temperature=0.1,
-    )
-    raw = resp.choices[0].message.content.strip()
-    print(f"🤖 AI ответ: {raw[:500]}", flush=True)
-    return extract_json(raw)
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": EXTRACT_PROMPT},
+                    {"role": "user", "content": f"Счёт:\n\n{text[:8000]}"},
+                ],
+                max_tokens=2000,
+                temperature=0.1,
+            )
+            raw = resp.choices[0].message.content.strip()
+            print(f"🤖 AI ответ: {raw[:500]}", flush=True)
+            return extract_json(raw)
+        except Exception as e:
+            if "429" in str(e) and attempt < 2:
+                wait = 30 * (attempt + 1)
+                print(f"⏳ Rate limit, жду {wait}с (попытка {attempt+1}/3)", flush=True)
+                time.sleep(wait)
+            else:
+                raise
 
 
 def parse_invoice_from_image(image_bytes: bytes, mime: str = "image/jpeg") -> dict:
