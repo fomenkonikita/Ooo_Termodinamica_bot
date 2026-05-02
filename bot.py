@@ -237,7 +237,7 @@ def parse_with_ai(text: str) -> dict:
                 model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": EXTRACT_PROMPT},
-                    {"role": "user", "content": f"Счёт:\n\n{text[:4000]}"},
+                    {"role": "user", "content": f"Счёт:\n\n{text[:2000]}"},
                 ],
                 max_tokens=2000,
                 temperature=0.1,
@@ -436,6 +436,12 @@ def webhook():
     update = telebot.types.Update.de_json(json_data)
     bot.process_new_updates([update])
     return "ok", 200
+
+
+@app.route("/retry")
+def manual_retry():
+    retry_failed_invoices()
+    return "Retry triggered", 200
 
 
 @app.route("/")
