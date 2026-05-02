@@ -432,7 +432,8 @@ def on_photo(msg):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     json_data = flask_request.get_json()
-    print(f"📨 Update: {list(json_data.keys()) if json_data else None}", flush=True)
+    msg = json_data.get("message", {}) if json_data else {}
+    print(f"📨 keys: {list(msg.keys())}", flush=True)
     update = telebot.types.Update.de_json(json_data)
     bot.process_new_updates([update])
     return "ok", 200
