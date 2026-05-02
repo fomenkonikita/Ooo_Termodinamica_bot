@@ -139,6 +139,22 @@ EXTRACT_PROMPT = """Ты парсер счетов-фактур и наклад�
 - Если поле неизвестно — пустая строка или 0"""
 
 
+def extract_json(text: str) -> dict:
+    # Find outermost { } block
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("JSON не найден в ответе AI")
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(text[start:i+1])
+    raise ValueError("Незакрытый JSON")
+
+
 def parse_invoice_from_text(text: str) -> dict:
     resp = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -150,10 +166,8 @@ def parse_invoice_from_text(text: str) -> dict:
         temperature=0.1,
     )
     raw = resp.choices[0].message.content.strip()
-    m = re.search(r"\{[\s\S]+\}", raw)
-    if not m:
-        raise ValueError(f"Не удалось извлечь JSON: {raw[:200]}")
-    return json.loads(m.group())
+    print(f"🤖 AI ответ: {raw[:500]}", flush=True)
+    return extract_json(raw)
 
 
 def parse_invoice_from_image(image_bytes: bytes, mime: str = "image/jpeg") -> dict:
@@ -173,10 +187,7 @@ def parse_invoice_from_image(image_bytes: bytes, mime: str = "image/jpeg") -> di
         temperature=0.1,
     )
     raw = resp.choices[0].message.content.strip()
-    m = re.search(r"\{[\s\S]+\}", raw)
-    if not m:
-        raise ValueError(f"Не удалось извлечь JSON: {raw[:200]}")
-    return json.loads(m.group())
+    return extract_json(raw)
 
 
 def invoice_to_rows(data: dict, start_num: int = 1) -> list:
