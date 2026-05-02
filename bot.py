@@ -207,10 +207,11 @@ EXTRACT_PROMPT = """Ты парсер счетов-фактур и наклад�
 
 Правила:
 - supplier: кто выставил счёт
-- total_amount: итоговая сумма всего счёта с НДС
-- pos: номер позиции в счёте
+- total_amount: итоговая сумма ВСЕГО счёта с НДС (строка "Итого")
+- pos: номер позиции в счёте (1, 2, 3...)
 - article: артикул, тип, марка, производитель (если есть)
-- price_with_vat: цена за единицу С НДС (если без НДС — умножь на 1.2)
+- price_with_vat: ЦЕНА ЗА ЕДИНИЦУ товара с НДС. Это НЕ сумма строки! Если в счёте колонки "Цена" и "Сумма" — бери значение из колонки "Цена", не из "Сумма". Если цена без НДС — умножь на 1.2
+- quantity: количество единиц товара
 - Если поле неизвестно — пустая строка или 0"""
 
 
@@ -285,10 +286,10 @@ def invoice_to_rows(data: dict, filename: str) -> list:
         except Exception:
             line_total = 0
         rows.append([
-            i, supplier, inv_num, inv_date,
+            i, filename, supplier, inv_num, inv_date,
             item.get("pos", i), item.get("name", "—"), item.get("article", ""),
             item.get("unit", "—"), qty, price, line_total,
-            today, total_amount, filename,
+            today, total_amount,
         ])
     return rows
 
