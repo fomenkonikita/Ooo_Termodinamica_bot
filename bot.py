@@ -501,6 +501,24 @@ def retry_failed_invoices():
 
 # ── Telegram handlers ──────────────────────────────────────────────────────────
 
+@bot.message_handler(content_types=["new_chat_members"])
+def on_new_member(msg):
+    for member in msg.new_chat_members:
+        if member.id == bot.get_me().id:
+            bot.send_message(
+                msg.chat.id,
+                "Привет! Я бот для учёта счетов от поставщиков 👋\n\n"
+                "Что умею:\n"
+                "📄 Принимаю счета в виде PDF, Excel (.xlsx/.xls) или фото\n"
+                "🤖 Извлекаю данные с помощью AI: поставщик, номер, дата, позиции, цены\n"
+                "📊 Автоматически записываю всё в Google Таблицу\n"
+                "🔄 При ошибке — повторяю попытку каждые 20 минут\n\n"
+                "Просто скиньте счёт в чат — остальное сделаю сам!\n\n"
+                f"📊 Таблица: https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
+            )
+            break
+
+
 @bot.message_handler(commands=["start", "help"])
 def on_start(msg):
     bot.reply_to(msg,
