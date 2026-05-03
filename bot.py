@@ -567,6 +567,11 @@ if __name__ == "__main__":
     bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
     print(f"Webhook: {WEBHOOK_URL}/{TELEGRAM_TOKEN}", flush=True)
 
+    bot.set_my_commands([
+        telebot.types.BotCommand("/start", "Информация и ссылка на таблицу"),
+        telebot.types.BotCommand("/retry", "Повторить обработку счетов с ошибками"),
+    ])
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(retry_failed_invoices, "interval", minutes=20)
     scheduler.start()
