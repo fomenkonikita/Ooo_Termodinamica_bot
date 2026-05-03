@@ -428,7 +428,7 @@ def process_invoice(msg, file_id: str, file_type: str, filename: str):
         bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
         return
 
-    set_reaction(msg, "🧮")
+    set_reaction(msg, "👀")
     registry_add(filename, file_id, file_type, msg.chat.id)
     row_num = registry_find_row(filename)
 
@@ -439,18 +439,18 @@ def process_invoice(msg, file_id: str, file_type: str, filename: str):
             raise ValueError("Позиции не найдены")
         sheet_append(INVOICES_SHEET, rows)
         registry_update(row_num, "✅")
-        set_reaction(msg, "🥂")
+        set_reaction(msg, "🏆")
     except Exception as e:
         err = str(e)
         is_limit = "429" in err or "413" in err
         print(f"❌ {filename}: {err[:200]}", flush=True)
         registry_update(row_num, "❌", err[:200])
         if is_limit:
-            set_reaction(msg, "⏰")
-            bot.reply_to(msg, f"⏰ Лимит запросов — «{filename}» повторю через 20 мин автоматически.")
+            set_reaction(msg, "😴")
+            bot.reply_to(msg, f"😴 Лимит запросов — «{filename}» повторю через 20 мин автоматически.")
         else:
-            set_reaction(msg, "🆘")
-            bot.reply_to(msg, f"🆘 Не удалось обработать «{filename}»\nОшибка: {err[:150]}")
+            set_reaction(msg, "🤬")
+            bot.reply_to(msg, f"🤬 Не удалось обработать «{filename}»\nОшибка: {err[:150]}")
 
 
 # ── Retry scheduler ────────────────────────────────────────────────────────────
@@ -509,10 +509,10 @@ def on_new_member(msg):
                 "📊 Автоматически записываю всё в Google Таблицу\n"
                 "🔄 При ошибке — повторяю попытку каждые 20 минут\n\n"
                 "Мои реакции:\n"
-                "🧮 — обрабатываю\n"
-                "🥂 — добавлено в таблицу\n"
-                "⏰ — лимит, повторю через 20 мин\n"
-                "🆘 — ошибка, загляни в лог\n\n"
+                "👀 — обрабатываю\n"
+                "🏆 — добавлено в таблицу\n"
+                "😴 — лимит, повторю через 20 мин\n"
+                "🤬 — ошибка, загляни в лог\n\n"
                 "Просто скиньте счёт в чат — остальное сделаю сам!\n\n"
                 f"📊 Таблица: https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
             )
