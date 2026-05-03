@@ -389,10 +389,11 @@ def invoice_to_rows(data: dict, filename: str) -> list:
             today, total_amount,
         ])
 
-    # Если AI не нашёл итог — считаем из позиций
-    if total_amount == 0 and items_sum > 0:
-        total_amount = round(items_sum, 2)
-        print(f"⚠️ total_amount был 0, посчитан из позиций: {total_amount}", flush=True)
+    # Если AI вернул 0 или явно заниженную сумму (меньше 60% от суммы позиций) — считаем сами
+    if items_sum > 0 and (total_amount == 0 or total_amount < items_sum * 0.6):
+        fixed = round(items_sum, 2)
+        print(f"⚠️ total_amount {total_amount} → пересчитан из позиций: {fixed}", flush=True)
+        total_amount = fixed
         for row in rows:
             row[13] = total_amount
 
