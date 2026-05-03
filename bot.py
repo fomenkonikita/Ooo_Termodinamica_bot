@@ -168,18 +168,18 @@ def registry_get_failed() -> list[dict]:
 # ── File parsing ───────────────────────────────────────────────────────────────
 
 def extract_text_from_pdf(data: bytes) -> str:
-    """Извлекает текст PDF: сначала заголовок (номер/дата), потом строки таблиц."""
+    """Извлекает текст PDF: заголовок счёта + строки таблиц + строка итого."""
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         header_lines = []
         table_rows = []
+        total_lines = []
         for page in pdf.pages:
             full_text = page.extract_text() or ""
-            # Ищем строку с номером и датой счёта
             for line in full_text.splitlines():
-                if re.search(r'счет[аё]?\s*(на\s*оплату)?\s*№', line, re.IGNORECASE):
+                if not header_lines and re.search(r'счет[аё]?\s*(на\s*оплату)?\s*№', line, re.IGNORECASE):
                     header_lines.append(line.strip())
-                    break
-            # Извлекаем таблицы
+                if re.search(r'итого|всего к оплате|к оплате', line, re.IGNORECASE):
+                    total_lines.append(line.strip())
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -188,8 +188,13 @@ def extract_text_from_pdf(data: bytes) -> str:
                             table_rows.append("\t".join(str(c).strip() if c else "" for c in row))
             elif not header_lines:
                 table_rows.append(full_text[:800])
-        result = "\n".join(header_lines) + "\n---\n" + "\n".join(table_rows)
-        return result
+        parts = []
+        if header_lines:
+            parts.append("\n".join(header_lines))
+        parts.append("\n".join(table_rows)[:2500])
+        if total_lines:
+            parts.append("ИТОГО: " + total_lines[-1])
+        return "\n---\n".join(parts)
 
 
 def is_scanned_pdf(data: bytes) -> bool:
@@ -333,7 +338,13 @@ def invoice_to_rows(data: dict, filename: str) -> list:
     inv_num = data.get("invoice_number", "—")
     inv_date = data.get("invoice_date", "—")
     total_amount = data.get("total_amount", 0) or 0
+    try:
+        total_amount = float(total_amount)
+    except Exception:
+        total_amount = 0
+
     rows = []
+    items_sum = 0.0
     for i, item in enumerate(data.get("items", []), start=1):
         qty = item.get("quantity", 0) or 0
         price = item.get("price_with_vat", 0) or 0
@@ -341,18 +352,26 @@ def invoice_to_rows(data: dict, filename: str) -> list:
             qty = float(qty)
             price = float(price)
             line_total = round(qty * price, 2)
-            # Если AI вернул сумму строки вместо цены — пересчитываем
             if qty > 1 and price > 0 and line_total == price:
                 price = round(price / qty, 2)
                 line_total = round(qty * price, 2)
         except Exception:
             line_total = 0
+        items_sum += line_total
         rows.append([
             i, filename, supplier, inv_num, inv_date,
             item.get("pos", i), item.get("name", "—"), item.get("article", ""),
             item.get("unit", "—"), qty, price, line_total,
             today, total_amount,
         ])
+
+    # Если AI не нашёл итог — считаем из позиций
+    if total_amount == 0 and items_sum > 0:
+        total_amount = round(items_sum, 2)
+        print(f"⚠️ total_amount был 0, посчитан из позиций: {total_amount}", flush=True)
+        for row in rows:
+            row[13] = total_amount
+
     return rows
 
 
