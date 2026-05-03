@@ -349,11 +349,18 @@ def parse_image_with_ai(image_bytes: bytes) -> dict:
     return extract_json(resp.choices[0].message.content.strip())
 
 
+PROMPT_PLACEHOLDERS = {"название поставщика", "номер счёта", "наименование", "артикул/тип или пусто"}
+
+def clean_field(val: str, fallback: str = "—") -> str:
+    if not val or val.strip().lower() in PROMPT_PLACEHOLDERS:
+        return fallback
+    return val.strip()
+
 def invoice_to_rows(data: dict, filename: str) -> list:
     today = datetime.now().strftime("%d.%m.%Y")
-    supplier = data.get("supplier", "—")
-    inv_num = data.get("invoice_number", "—")
-    inv_date = data.get("invoice_date", "—")
+    supplier = clean_field(data.get("supplier", ""))
+    inv_num = clean_field(data.get("invoice_number", ""))
+    inv_date = clean_field(data.get("invoice_date", ""))
     total_amount = data.get("total_amount", 0) or 0
     try:
         total_amount = float(total_amount)
