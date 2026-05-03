@@ -153,7 +153,7 @@ def registry_get_failed() -> list[dict]:
     rows = sheet_get_all(REGISTRY_SHEET)
     failed = []
     for i, row in enumerate(rows[1:], start=2):
-        if len(row) >= 8 and row[1] == "❌":
+        if len(row) >= 8 and row[1] in ("❌", "⏳"):
             failed.append({
                 "row": i,
                 "filename": row[0],
@@ -204,11 +204,16 @@ def extract_text_from_excel(data: bytes) -> str:
     lines = []
     for sheet in wb.worksheets:
         for row in sheet.iter_rows(values_only=True):
-            vals = [str(v).strip() if v is not None else "" for v in row]
-            # Пропускаем строки где менее 2 непустых значений
+            vals = []
+            for v in row:
+                try:
+                    vals.append(str(v).strip() if v is not None else "")
+                except Exception:
+                    vals.append("")
             if sum(1 for v in vals if v) >= 2:
                 lines.append("\t".join(vals))
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    return text[:3000]
 
 
 EXTRACT_PROMPT = """Ты парсер счетов-фактур и накладных.
@@ -366,7 +371,7 @@ def process_invoice(msg, file_id: str, file_type: str, filename: str):
         bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
         return
 
-    set_reaction(msg, "⏳")
+    set_reaction(msg, "👀")
     registry_add(filename, file_id, file_type, msg.chat.id)
     row_num = registry_find_row(filename)
 
@@ -377,7 +382,7 @@ def process_invoice(msg, file_id: str, file_type: str, filename: str):
             raise ValueError("Позиции не найдены")
         sheet_append(INVOICES_SHEET, rows)
         registry_update(row_num, "✅")
-        set_reaction(msg, "✅")
+        set_reaction(msg, "👍")
         supplier = data.get("supplier", "—")
         inv_num = data.get("invoice_number", "—")
         inv_date = data.get("invoice_date", "—")
@@ -392,7 +397,7 @@ def process_invoice(msg, file_id: str, file_type: str, filename: str):
         err = str(e)[:200]
         print(f"❌ {filename}: {err}", flush=True)
         registry_update(row_num, "❌", err)
-        set_reaction(msg, "❌")
+        set_reaction(msg, "👎")
         bot.reply_to(msg, f"❌ Ошибка: {err}\n⏳ Повтор через 20 мин автоматически.")
 
 
