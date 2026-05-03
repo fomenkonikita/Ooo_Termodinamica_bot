@@ -199,11 +199,28 @@ def is_scanned_pdf(data: bytes) -> bool:
     return total < 50
 
 
+def _excel_rows_to_text(all_rows: list[list[str]]) -> str:
+    """Из списка строк вытаскивает заголовок счёта + строки таблицы."""
+    header = ""
+    table_lines = []
+    for vals in all_rows:
+        nonempty = [v for v in vals if v]
+        # Заголовок счёта — одна ячейка с "счет.*№"
+        if not header and len(nonempty) == 1:
+            if re.search(r'счет[аё]?\s*(на\s*оплату)?\s*№', nonempty[0], re.IGNORECASE):
+                header = nonempty[0]
+                continue
+        if len(nonempty) >= 2:
+            table_lines.append("\t".join(vals))
+    prefix = header + "\n---\n" if header else ""
+    return (prefix + "\n".join(table_lines))[:3000]
+
+
 def extract_text_from_excel(data: bytes) -> str:
-    """Парсит .xlsx (openpyxl) и .xls (xlrd), игнорируя пустые строки."""
-    lines = []
+    """Парсит .xlsx (openpyxl) и .xls (xlrd)."""
     try:
         wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+        all_rows = []
         for sheet in wb.worksheets:
             for row in sheet.iter_rows(values_only=True):
                 vals = []
@@ -212,11 +229,11 @@ def extract_text_from_excel(data: bytes) -> str:
                         vals.append(str(v).strip() if v is not None else "")
                     except Exception:
                         vals.append("")
-                if sum(1 for v in vals if v) >= 2:
-                    lines.append("\t".join(vals))
+                all_rows.append(vals)
     except Exception:
         # Fallback: старый формат .xls
         book = xlrd.open_workbook(file_contents=data)
+        all_rows = []
         for sheet in book.sheets():
             for row_idx in range(sheet.nrows):
                 vals = []
@@ -225,9 +242,8 @@ def extract_text_from_excel(data: bytes) -> str:
                         vals.append(str(v).strip() if v != "" else "")
                     except Exception:
                         vals.append("")
-                if sum(1 for v in vals if v) >= 2:
-                    lines.append("\t".join(vals))
-    return "\n".join(lines)[:3000]
+                all_rows.append(vals)
+    return _excel_rows_to_text(all_rows)
 
 
 EXTRACT_PROMPT = """Ты парсер счетов-фактур и накладных.
