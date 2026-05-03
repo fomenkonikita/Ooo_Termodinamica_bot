@@ -17,6 +17,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 import pdfplumber
 import openpyxl
+import xlrd
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
@@ -199,21 +200,34 @@ def is_scanned_pdf(data: bytes) -> bool:
 
 
 def extract_text_from_excel(data: bytes) -> str:
-    """Парсит Excel, игнорируя пустые и служебные строки."""
-    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+    """Парсит .xlsx (openpyxl) и .xls (xlrd), игнорируя пустые строки."""
     lines = []
-    for sheet in wb.worksheets:
-        for row in sheet.iter_rows(values_only=True):
-            vals = []
-            for v in row:
-                try:
-                    vals.append(str(v).strip() if v is not None else "")
-                except Exception:
-                    vals.append("")
-            if sum(1 for v in vals if v) >= 2:
-                lines.append("\t".join(vals))
-    text = "\n".join(lines)
-    return text[:3000]
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                vals = []
+                for v in row:
+                    try:
+                        vals.append(str(v).strip() if v is not None else "")
+                    except Exception:
+                        vals.append("")
+                if sum(1 for v in vals if v) >= 2:
+                    lines.append("\t".join(vals))
+    except Exception:
+        # Fallback: старый формат .xls
+        book = xlrd.open_workbook(file_contents=data)
+        for sheet in book.sheets():
+            for row_idx in range(sheet.nrows):
+                vals = []
+                for v in sheet.row_values(row_idx):
+                    try:
+                        vals.append(str(v).strip() if v != "" else "")
+                    except Exception:
+                        vals.append("")
+                if sum(1 for v in vals if v) >= 2:
+                    lines.append("\t".join(vals))
+    return "\n".join(lines)[:3000]
 
 
 EXTRACT_PROMPT = """Ты парсер счетов-фактур и накладных.
