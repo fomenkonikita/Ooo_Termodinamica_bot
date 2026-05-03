@@ -167,28 +167,40 @@ def registry_get_failed() -> list[dict]:
 # ── File parsing ───────────────────────────────────────────────────────────────
 
 def extract_text_from_pdf(data: bytes) -> str:
+    """Извлекает только строки таблиц из PDF. Если таблиц нет — plain text."""
     with pdfplumber.open(io.BytesIO(data)) as pdf:
-        pages = []
+        rows = []
         for page in pdf.pages:
-            text = page.extract_text() or ""
             tables = page.extract_tables()
             if tables:
                 for table in tables:
                     for row in table:
-                        if row:
-                            text += "\n" + "\t".join(str(c) if c else "" for c in row)
-            pages.append(text)
-    return "\n\n---\n\n".join(pages)
+                        if row and any(c for c in row if c and str(c).strip()):
+                            rows.append("\t".join(str(c).strip() if c else "" for c in row))
+            else:
+                text = page.extract_text()
+                if text:
+                    rows.append(text[:1000])
+    return "\n".join(rows)
+
+
+def is_scanned_pdf(data: bytes) -> bool:
+    """True если PDF не содержит текста (скан)."""
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        total = sum(len(p.extract_text() or "") for p in pdf.pages)
+    return total < 50
 
 
 def extract_text_from_excel(data: bytes) -> str:
+    """Парсит Excel, игнорируя пустые и служебные строки."""
     wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
     lines = []
     for sheet in wb.worksheets:
-        lines.append(f"=== {sheet.title} ===")
         for row in sheet.iter_rows(values_only=True):
-            if any(v is not None for v in row):
-                lines.append("\t".join(str(v) if v is not None else "" for v in row))
+            vals = [str(v).strip() if v is not None else "" for v in row]
+            # Пропускаем строки где менее 2 непустых значений
+            if sum(1 for v in vals if v) >= 2:
+                lines.append("\t".join(vals))
     return "\n".join(lines)
 
 
@@ -282,7 +294,13 @@ def invoice_to_rows(data: dict, filename: str) -> list:
         qty = item.get("quantity", 0) or 0
         price = item.get("price_with_vat", 0) or 0
         try:
-            line_total = round(float(qty) * float(price), 2)
+            qty = float(qty)
+            price = float(price)
+            line_total = round(qty * price, 2)
+            # Если AI вернул сумму строки вместо цены — пересчитываем
+            if qty > 1 and price > 0 and line_total == price:
+                price = round(price / qty, 2)
+                line_total = round(qty * price, 2)
         except Exception:
             line_total = 0
         rows.append([
@@ -315,10 +333,15 @@ def set_reaction(msg, emoji: str):
 def process_file(file_id: str, file_type: str, filename: str) -> dict:
     file_bytes = download_file(file_id)
     if file_type == "pdf":
+        if is_scanned_pdf(file_bytes):
+            print(f"🖼 Скан — использую Vision", flush=True)
+            return parse_image_with_ai(file_bytes)
         text = extract_text_from_pdf(file_bytes)
+        print(f"📄 Текст PDF: {len(text)} символов", flush=True)
         return parse_with_ai(text)
     elif file_type == "excel":
         text = extract_text_from_excel(file_bytes)
+        print(f"📊 Текст Excel: {len(text)} символов", flush=True)
         return parse_with_ai(text)
     elif file_type == "photo":
         return parse_image_with_ai(file_bytes)
