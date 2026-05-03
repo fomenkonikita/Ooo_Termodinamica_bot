@@ -429,7 +429,12 @@ def process_file(file_id: str, file_type: str, filename: str) -> dict:
         if is_garbled_text(text):
             print(f"🖼 Кириллица нечитаема — использую Vision", flush=True)
             return parse_image_with_ai(file_bytes)
-        return parse_with_ai(text)
+        data = parse_with_ai(text)
+        supplier = (data.get("supplier") or "").strip().lower()
+        if not supplier or supplier in PROMPT_PLACEHOLDERS:
+            print(f"🖼 Поставщик не распознан — пробую Vision", flush=True)
+            return parse_image_with_ai(file_bytes)
+        return data
     elif file_type == "excel":
         text = extract_text_from_excel(file_bytes)
         print(f"📊 Текст Excel: {len(text)} символов", flush=True)
