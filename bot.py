@@ -179,11 +179,14 @@ def extract_text_from_pdf(data: bytes) -> str:
     """Извлекает текст PDF: заголовок счёта + строки таблиц + строка итого."""
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         header_lines = []
+        supplier_line = ""
         table_rows = []
         total_lines = []
         for page in pdf.pages:
             full_text = page.extract_text() or ""
             for line in full_text.splitlines():
+                if not supplier_line and re.search(r'^поставщик:', line, re.IGNORECASE):
+                    supplier_line = line.strip()
                 if not header_lines and re.search(r'счет[аё]?\s*(на\s*оплату)?\s*№', line, re.IGNORECASE):
                     header_lines.append(line.strip())
                 if re.search(r'итого|всего к оплате|к оплате', line, re.IGNORECASE):
@@ -197,6 +200,8 @@ def extract_text_from_pdf(data: bytes) -> str:
             elif not header_lines:
                 table_rows.append(full_text[:800])
         parts = []
+        if supplier_line:
+            parts.append(supplier_line)
         if header_lines:
             parts.append("\n".join(header_lines))
         parts.append("\n".join(table_rows)[:2500])
