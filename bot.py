@@ -458,6 +458,25 @@ def retry_failed_invoices():
 
 # ── Telegram handlers ──────────────────────────────────────────────────────────
 
+@bot.message_handler(commands=["start", "help"])
+def on_start(msg):
+    bot.reply_to(msg,
+        "Привет! Отправь мне счёт (PDF, Excel или фото) — я внесу его в таблицу.\n\n"
+        "/retry — повторить обработку счетов с ошибками\n"
+        f"📊 Таблица: https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
+    )
+
+
+@bot.message_handler(commands=["retry"])
+def on_retry(msg):
+    failed = registry_get_failed()
+    if not failed:
+        bot.reply_to(msg, "Нет счетов для повтора.")
+        return
+    bot.reply_to(msg, f"Запускаю повтор для {len(failed)} счет(ов)...")
+    retry_failed_invoices()
+
+
 @bot.message_handler(content_types=["document"])
 def on_document(msg):
     doc = msg.document
