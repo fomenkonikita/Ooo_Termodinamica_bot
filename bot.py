@@ -153,15 +153,23 @@ def registry_update(row_num: int, status: str, error: str = ""):
 def registry_get_failed() -> list[dict]:
     rows = sheet_get_all(REGISTRY_SHEET)
     failed = []
+    now = datetime.now()
     for i, row in enumerate(rows[1:], start=2):
-        if len(row) >= 8 and row[1] in ("❌", "⏳"):
-            failed.append({
-                "row": i,
-                "filename": row[0],
-                "file_id": row[5],
-                "file_type": row[6],
-                "chat_id": int(row[7]),
-            })
+        if len(row) < 8:
+            continue
+        status = row[1]
+        if status == "❌":
+            failed.append({"row": i, "filename": row[0], "file_id": row[5],
+                           "file_type": row[6], "chat_id": int(row[7])})
+        elif status == "⏳":
+            # Ретраим только если завис более 30 минут (защита от гонки с планировщиком)
+            try:
+                received = datetime.strptime(row[2], "%d.%m.%Y %H:%M")
+                if (now - received).total_seconds() > 1800:
+                    failed.append({"row": i, "filename": row[0], "file_id": row[5],
+                                   "file_type": row[6], "chat_id": int(row[7])})
+            except Exception:
+                pass
     return failed
 
 
