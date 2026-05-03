@@ -212,6 +212,15 @@ def is_scanned_pdf(data: bytes) -> bool:
     return total < 50
 
 
+def is_garbled_text(text: str) -> bool:
+    """True если кириллица нечитаема — кодировка шрифта сломана."""
+    alpha = [c for c in text if c.isalpha()]
+    if len(alpha) < 20:
+        return True
+    readable = sum(1 for c in alpha if 'Ѐ' <= c <= 'ӿ' or c.isascii())
+    return readable / len(alpha) < 0.5
+
+
 def _excel_rows_to_text(all_rows: list[list[str]]) -> str:
     """Из списка строк вытаскивает заголовок счёта + строки таблицы."""
     header = ""
@@ -409,6 +418,9 @@ def process_file(file_id: str, file_type: str, filename: str) -> dict:
             return parse_image_with_ai(file_bytes)
         text = extract_text_from_pdf(file_bytes)
         print(f"📄 Текст PDF: {len(text)} символов", flush=True)
+        if is_garbled_text(text):
+            print(f"🖼 Кириллица нечитаема — использую Vision", flush=True)
+            return parse_image_with_ai(file_bytes)
         return parse_with_ai(text)
     elif file_type == "excel":
         text = extract_text_from_excel(file_bytes)
