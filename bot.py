@@ -5,6 +5,8 @@ import re
 import base64
 import time
 from datetime import datetime
+from queue import Queue
+from threading import Thread
 
 import requests
 import telebot
@@ -40,6 +42,20 @@ REGISTRY_HEADERS = ["Имя файла", "Статус", "Получен", "Об
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
 app = Flask(__name__)
+
+_invoice_queue: Queue = Queue()
+
+
+def _queue_worker():
+    while True:
+        item = _invoice_queue.get()
+        try:
+            msg, file_id, file_type, filename = item
+            process_invoice(msg, file_id, file_type, filename)
+        except Exception as e:
+            print(f"⚠️ Queue worker error: {e}", flush=True)
+        finally:
+            _invoice_queue.task_done()
 
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
@@ -578,14 +594,14 @@ def on_document(msg):
         ftype = "excel"
     else:
         return
-    process_invoice(msg, doc.file_id, ftype, doc.file_name or "unknown.pdf")
+    _invoice_queue.put((msg, doc.file_id, ftype, doc.file_name or "unknown.pdf"))
 
 
 @bot.message_handler(content_types=["photo"])
 def on_photo(msg):
     photo = msg.photo[-1]
     filename = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-    process_invoice(msg, photo.file_id, "photo", filename)
+    _invoice_queue.put((msg, photo.file_id, "photo", filename))
 
 
 # ── Flask ──────────────────────────────────────────────────────────────────────
@@ -627,6 +643,10 @@ if __name__ == "__main__":
         telebot.types.BotCommand("/start", "Информация и ссылка на таблицу"),
         telebot.types.BotCommand("/retry", "Повторить обработку счетов с ошибками"),
     ])
+
+    worker = Thread(target=_queue_worker, daemon=True)
+    worker.start()
+    print("📋 Queue worker запущен", flush=True)
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(retry_failed_invoices, "interval", minutes=20)
