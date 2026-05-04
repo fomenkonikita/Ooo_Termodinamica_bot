@@ -468,15 +468,9 @@ def process_file(file_id: str, file_type: str, filename: str) -> dict:
 
 def process_invoice(msg, file_id: str, file_type: str, filename: str):
     print(f"📥 {filename} ({file_type})", flush=True)
-
-    # Дубль?
-    if registry_is_done(filename):
-        bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
-        return
-
-    set_reaction(msg, "👀")
-    registry_add(filename, file_id, file_type, msg.chat.id)
     row_num = registry_find_row(filename)
+    if row_num is None:
+        return  # не зарегистрирован — пропускаем
 
     try:
         data = process_file(file_id, file_type, filename)
@@ -584,6 +578,17 @@ def on_retry(msg):
     retry_failed_invoices()
 
 
+def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
+    """Сразу регистрирует файл и ставит 👀, потом кладёт в очередь обработки."""
+    if registry_is_done(filename):
+        bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
+        return
+    set_reaction(msg, "👀")
+    registry_add(filename, file_id, file_type, msg.chat.id)
+    print(f"📋 В очередь: {filename}", flush=True)
+    _invoice_queue.put((msg, file_id, file_type, filename))
+
+
 @bot.message_handler(content_types=["document"])
 def on_document(msg):
     doc = msg.document
@@ -594,14 +599,14 @@ def on_document(msg):
         ftype = "excel"
     else:
         return
-    _invoice_queue.put((msg, doc.file_id, ftype, doc.file_name or "unknown.pdf"))
+    enqueue_invoice(msg, doc.file_id, ftype, doc.file_name or "unknown.pdf")
 
 
 @bot.message_handler(content_types=["photo"])
 def on_photo(msg):
     photo = msg.photo[-1]
     filename = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-    _invoice_queue.put((msg, photo.file_id, "photo", filename))
+    enqueue_invoice(msg, photo.file_id, "photo", filename)
 
 
 # ── Flask ──────────────────────────────────────────────────────────────────────
