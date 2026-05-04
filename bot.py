@@ -35,7 +35,8 @@ REGISTRY_SHEET = "Реестр"
 
 INVOICES_HEADERS = ["№", "Поставщик", "Номер счёта", "Дата счёта", "Позиция в счете",
                     "Наименование", "Артикул/Описание", "Ед.изм.", "Кол-во",
-                    "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете", "Имя файла"]
+                    "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете", "Имя файла",
+                    "Примечание"]
 
 REGISTRY_HEADERS = ["Имя файла", "Статус", "Получен", "Обработан", "Ошибка", "file_id", "file_type", "chat_id"]
 
@@ -50,8 +51,8 @@ def _queue_worker():
     while True:
         item = _invoice_queue.get()
         try:
-            msg, file_id, file_type, filename = item
-            process_invoice(msg, file_id, file_type, filename)
+            msg, file_id, file_type, filename, caption = item
+            process_invoice(msg, file_id, file_type, filename, caption)
         except Exception as e:
             print(f"⚠️ Queue worker error: {e}", flush=True)
         finally:
@@ -379,7 +380,7 @@ def clean_field(val: str, fallback: str = "—") -> str:
         return fallback
     return val.strip()
 
-def invoice_to_rows(data: dict, filename: str) -> list:
+def invoice_to_rows(data: dict, filename: str, caption: str = "") -> list:
     today = datetime.now().strftime("%d.%m.%Y")
     supplier = clean_field(data.get("supplier", ""))
     inv_num = clean_field(data.get("invoice_number", ""))
@@ -409,7 +410,7 @@ def invoice_to_rows(data: dict, filename: str) -> list:
             i, filename, supplier, inv_num, inv_date,
             item.get("pos", i), item.get("name", "—"), item.get("article", ""),
             item.get("unit", "—"), qty, price, line_total,
-            today, total_amount,
+            today, total_amount, caption,
         ])
 
     # Если AI вернул 0 или явно заниженную сумму (меньше 60% от суммы позиций) — считаем сами
@@ -468,7 +469,7 @@ def process_file(file_id: str, file_type: str, filename: str) -> dict:
         raise ValueError(f"Неизвестный тип: {file_type}")
 
 
-def process_invoice(msg, file_id: str, file_type: str, filename: str):
+def process_invoice(msg, file_id: str, file_type: str, filename: str, caption: str = ""):
     print(f"📥 {filename} ({file_type})", flush=True)
     row_num = registry_find_row(filename)
     if row_num is None:
@@ -476,7 +477,7 @@ def process_invoice(msg, file_id: str, file_type: str, filename: str):
 
     try:
         data = process_file(file_id, file_type, filename)
-        rows = invoice_to_rows(data, filename)
+        rows = invoice_to_rows(data, filename, caption)
         if not rows:
             raise ValueError("Позиции не найдены")
         sheet_append(INVOICES_SHEET, rows)
@@ -549,6 +550,7 @@ def on_new_member(msg):
                 "📄 Принимаю счета в виде PDF, Excel (.xlsx/.xls) или фото\n"
                 "🤖 Извлекаю данные с помощью AI: поставщик, номер, дата, позиции, цены\n"
                 "📊 Автоматически записываю всё в Google Таблицу\n"
+                "💬 Подпись к файлу сохраняю в столбец Примечание\n"
                 "🔄 При ошибке — повторяю попытку каждые 20 минут\n\n"
                 "Мои реакции:\n"
                 "👀 — обрабатываю\n"
@@ -585,10 +587,11 @@ def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
     if registry_is_done(filename):
         bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
         return
+    caption = msg.caption or ""
     set_reaction(msg, "👀")
     registry_add(filename, file_id, file_type, msg.chat.id)
     print(f"📋 В очередь: {filename}", flush=True)
-    _invoice_queue.put((msg, file_id, file_type, filename))
+    _invoice_queue.put((msg, file_id, file_type, filename, caption))
 
 
 @bot.message_handler(content_types=["document"])
