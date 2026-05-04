@@ -3,10 +3,10 @@ import io
 import json
 import re
 import base64
+import gc
 import time
 from datetime import datetime
-from queue import Queue
-from threading import Thread
+from threading import Thread, Lock
 
 import requests
 import telebot
@@ -33,46 +33,62 @@ SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1tmuj1f2D2euUZlr-CXHzgkurRavF
 INVOICES_SHEET = "Счета"
 REGISTRY_SHEET = "Реестр"
 
-INVOICES_HEADERS = ["№", "Поставщик", "Номер счёта", "Дата счёта", "Позиция в счете",
+INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номер счёта", "Дата счёта", "Позиция в счёте",
                     "Наименование", "Артикул/Описание", "Ед.изм.", "Кол-во",
-                    "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете", "Имя файла",
+                    "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете",
                     "Примечание"]
 
-REGISTRY_HEADERS = ["Имя файла", "Статус", "Получен", "Обработан", "Ошибка", "file_id", "file_type", "chat_id"]
+REGISTRY_HEADERS = ["#", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
+                    "file_id", "file_type", "chat_id", "Примечание"]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
 app = Flask(__name__)
 
-_invoice_queue: Queue = Queue()
-
-
-def _queue_worker():
-    while True:
-        item = _invoice_queue.get()
-        try:
-            msg, file_id, file_type, filename, caption = item
-            process_invoice(msg, file_id, file_type, filename, caption)
-        except Exception as e:
-            print(f"⚠️ Queue worker error: {e}", flush=True)
-        finally:
-            _invoice_queue.task_done()
-            if not _invoice_queue.empty():
-                time.sleep(3)  # пауза между файлами чтобы не упереться в лимит Groq
-
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
 
+_sheets_service_obj = None
+_sheets_lock = Lock()
+
 def get_sheets_service():
-    creds = Credentials(
-        token=None,
-        refresh_token=GOOGLE_SHEETS_REFRESH_TOKEN,
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
-        token_uri="https://oauth2.googleapis.com/token",
-    )
-    creds.refresh(Request())
-    return build("sheets", "v4", credentials=creds)
+    global _sheets_service_obj
+    with _sheets_lock:
+        if _sheets_service_obj is None:
+            creds = Credentials(
+                token=None,
+                refresh_token=GOOGLE_SHEETS_REFRESH_TOKEN,
+                client_id=GOOGLE_CLIENT_ID,
+                client_secret=GOOGLE_CLIENT_SECRET,
+                token_uri="https://oauth2.googleapis.com/token",
+            )
+            creds.refresh(Request())
+            _sheets_service_obj = build("sheets", "v4", credentials=creds)
+        return _sheets_service_obj
+
+
+_STATUSES = {"⏳", "⚙️", "✅", "❌"}
+
+
+def _migrate_registry(service):
+    """Приводит старые строки реестра (без # в колонке A) к новому формату."""
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID, range=f"{REGISTRY_SHEET}!A:Z"
+    ).execute()
+    rows = result.get("values", [])
+    updates = []
+    for i, row in enumerate(rows[1:], start=2):
+        if len(row) >= 2 and row[1] in _STATUSES:
+            updates.append({
+                "range": f"{REGISTRY_SHEET}!A{i}",
+                "values": [[""] + row],
+            })
+    if updates:
+        service.spreadsheets().values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"valueInputOption": "RAW", "data": updates},
+        ).execute()
+        print(f"🔧 Мигрировано {len(updates)} строк реестра", flush=True)
 
 
 def ensure_sheets():
@@ -92,19 +108,21 @@ def ensure_sheets():
             body={"requests": requests_body}
         ).execute()
 
-    # Write headers if sheets are new/empty
-    for sheet, headers in [(INVOICES_SHEET, INVOICES_HEADERS), (REGISTRY_SHEET, REGISTRY_HEADERS)]:
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=f"{sheet}!A1"
-        ).execute()
-        if not result.get("values"):
-            service.spreadsheets().values().update(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"{sheet}!A1",
-                valueInputOption="RAW",
-                body={"values": [headers]},
-            ).execute()
+    # Always update headers (handles column order fixes)
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{INVOICES_SHEET}!A1",
+        valueInputOption="RAW",
+        body={"values": [INVOICES_HEADERS]},
+    ).execute()
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{REGISTRY_SHEET}!A1",
+        valueInputOption="RAW",
+        body={"values": [REGISTRY_HEADERS]},
+    ).execute()
 
+    _migrate_registry(service)
     print("✅ Таблица готова", flush=True)
 
 
@@ -144,65 +162,43 @@ def sheet_update_cell(sheet: str, row: int, col: int, value: str):
 def registry_find_row(filename: str) -> int | None:
     rows = sheet_get_all(REGISTRY_SHEET)
     for i, row in enumerate(rows[1:], start=2):
-        if row and row[0] == filename:
+        if len(row) > 1 and row[1] == filename:
             return i
     return None
 
 
-def registry_is_done(filename: str) -> bool:
+def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
+                 message_id: int, caption: str = ""):
     rows = sheet_get_all(REGISTRY_SHEET)
-    for row in rows[1:]:
-        if row and row[0] == filename and len(row) > 1 and row[1] == "✅":
-            return True
-    return False
-
-
-def registry_add(filename: str, file_id: str, file_type: str, chat_id: int):
+    seq_num = len(rows)   # header — строка 1; первая запись → #1, вторая → #2 ...
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    sheet_append(REGISTRY_SHEET, [[filename, "⏳", now, "", "", file_id, file_type, str(chat_id)]])
+    sheet_append(REGISTRY_SHEET, [[
+        seq_num, filename, "⏳", now, "", "", file_id, file_type,
+        str(chat_id), caption, str(message_id)
+    ]])
 
 
 def registry_update(row_num: int, status: str, error: str = ""):
     now = datetime.now().strftime("%d.%m.%Y %H:%M") if status == "✅" else ""
-    sheet_update_cell(REGISTRY_SHEET, row_num, 2, status)
-    sheet_update_cell(REGISTRY_SHEET, row_num, 4, now)
-    sheet_update_cell(REGISTRY_SHEET, row_num, 5, error)
-
-
-def registry_get_failed() -> list[dict]:
-    rows = sheet_get_all(REGISTRY_SHEET)
-    failed = []
-    now = datetime.now()
-    for i, row in enumerate(rows[1:], start=2):
-        if len(row) < 8:
-            continue
-        status = row[1]
-        if status == "❌":
-            failed.append({"row": i, "filename": row[0], "file_id": row[5],
-                           "file_type": row[6], "chat_id": int(row[7])})
-        elif status == "⏳":
-            # Ретраим если завис более 5 минут (защита от гонки с воркером)
-            try:
-                received = datetime.strptime(row[2], "%d.%m.%Y %H:%M")
-                if (now - received).total_seconds() > 300:
-                    failed.append({"row": i, "filename": row[0], "file_id": row[5],
-                                   "file_type": row[6], "chat_id": int(row[7])})
-            except Exception:
-                pass
-    return failed
+    sheet_update_cell(REGISTRY_SHEET, row_num, 3, status)   # C = Статус
+    sheet_update_cell(REGISTRY_SHEET, row_num, 5, now)      # E = Обработан
+    sheet_update_cell(REGISTRY_SHEET, row_num, 6, error)    # F = Ошибка
 
 
 # ── File parsing ───────────────────────────────────────────────────────────────
 
-def extract_text_from_pdf(data: bytes) -> str:
-    """Извлекает текст PDF: заголовок счёта + строки таблиц + строка итого."""
+def extract_text_from_pdf(data: bytes) -> tuple[str, bool]:
+    """Один проход по PDF. Возвращает (text, is_scanned).
+    is_scanned=True если текста меньше 50 символов."""
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         header_lines = []
         supplier_line = ""
         table_rows = []
         total_lines = []
+        total_chars = 0
         for page in pdf.pages:
             full_text = page.extract_text() or ""
+            total_chars += len(full_text)
             for line in full_text.splitlines():
                 if not supplier_line and re.search(r'^поставщик:', line, re.IGNORECASE):
                     supplier_line = line.strip()
@@ -218,22 +214,35 @@ def extract_text_from_pdf(data: bytes) -> str:
                             table_rows.append("\t".join(str(c).strip() if c else "" for c in row))
             elif not header_lines:
                 table_rows.append(full_text[:800])
-        parts = []
-        if supplier_line:
-            parts.append(supplier_line)
-        if header_lines:
-            parts.append("\n".join(header_lines))
-        parts.append("\n".join(table_rows)[:2500])
-        if total_lines:
-            parts.append("ИТОГО: " + total_lines[-1])
-        return "\n---\n".join(parts)
+    if total_chars < 50:
+        return "", True
+    parts = []
+    if supplier_line:
+        parts.append(supplier_line)
+    if header_lines:
+        parts.append("\n".join(header_lines))
+    parts.append("\n".join(table_rows)[:2500])
+    if total_lines:
+        parts.append("ИТОГО: " + total_lines[-1])
+    return "\n---\n".join(parts), False
 
 
-def is_scanned_pdf(data: bytes) -> bool:
-    """True если PDF не содержит текста (скан)."""
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
-        total = sum(len(p.extract_text() or "") for p in pdf.pages)
-    return total < 50
+def compress_for_vision(image_bytes: bytes, max_px: int = 1024) -> bytes:
+    """Сжимает изображение перед Vision API. PDF возвращает как есть."""
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.mode in ('RGBA', 'P', 'LA'):
+            img = img.convert('RGB')
+        if max(img.size) > max_px:
+            img.thumbnail((max_px, max_px), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=85, optimize=True)
+        compressed = buf.getvalue()
+        print(f"🗜 {len(image_bytes)//1024}KB → {len(compressed)//1024}KB", flush=True)
+        return compressed
+    except Exception:
+        return image_bytes  # PDF или нечитаемый формат — без изменений
 
 
 def is_garbled_text(text: str) -> bool:
@@ -251,7 +260,6 @@ def _excel_rows_to_text(all_rows: list[list[str]]) -> str:
     table_lines = []
     for vals in all_rows:
         nonempty = [v for v in vals if v]
-        # Заголовок счёта — одна ячейка с "счет.*№"
         if not header and len(nonempty) == 1:
             if re.search(r'счет[аё]?\s*(на\s*оплату)?\s*№', nonempty[0], re.IGNORECASE):
                 header = nonempty[0]
@@ -277,7 +285,6 @@ def extract_text_from_excel(data: bytes) -> str:
                         vals.append("")
                 all_rows.append(vals)
     except Exception:
-        # Fallback: старый формат .xls
         book = xlrd.open_workbook(file_contents=data)
         all_rows = []
         for sheet in book.sheets():
@@ -413,7 +420,6 @@ def invoice_to_rows(data: dict, filename: str, caption: str = "") -> list:
             today, total_amount, caption,
         ])
 
-    # Если AI вернул 0 или явно заниженную сумму (меньше 60% от суммы позиций) — считаем сами
     if items_sum > 0 and (total_amount == 0 or total_amount < items_sum * 0.6):
         fixed = round(items_sum, 2)
         print(f"⚠️ total_amount {total_amount} → пересчитан из позиций: {fixed}", flush=True)
@@ -432,10 +438,10 @@ def download_file(file_id: str) -> bytes:
     return requests.get(url).content
 
 
-def set_reaction(msg, emoji: str):
+def set_reaction(chat_id: int, message_id: int, emoji: str):
     try:
         bot.set_message_reaction(
-            msg.chat.id, msg.message_id,
+            chat_id, message_id,
             [telebot.types.ReactionTypeEmoji(emoji)],
         )
     except Exception as e:
@@ -444,37 +450,70 @@ def set_reaction(msg, emoji: str):
 
 def process_file(file_id: str, file_type: str, filename: str) -> dict:
     file_bytes = download_file(file_id)
-    if file_type == "pdf":
-        if is_scanned_pdf(file_bytes):
-            print(f"🖼 Скан — использую Vision", flush=True)
-            return parse_image_with_ai(file_bytes)
-        text = extract_text_from_pdf(file_bytes)
-        print(f"📄 Текст PDF: {len(text)} символов", flush=True)
-        if is_garbled_text(text):
-            print(f"🖼 Кириллица нечитаема — использую Vision", flush=True)
-            return parse_image_with_ai(file_bytes)
-        data = parse_with_ai(text)
-        supplier = (data.get("supplier") or "").strip().lower()
-        if not supplier or supplier in PROMPT_PLACEHOLDERS:
-            print(f"🖼 Поставщик не распознан — пробую Vision", flush=True)
-            return parse_image_with_ai(file_bytes)
-        return data
-    elif file_type == "excel":
-        text = extract_text_from_excel(file_bytes)
-        print(f"📊 Текст Excel: {len(text)} символов", flush=True)
-        return parse_with_ai(text)
-    elif file_type == "photo":
-        return parse_image_with_ai(file_bytes)
-    else:
-        raise ValueError(f"Неизвестный тип: {file_type}")
+    try:
+        if file_type == "pdf":
+            text, is_scanned = extract_text_from_pdf(file_bytes)
+            if is_scanned:
+                print(f"🖼 Скан — использую Vision", flush=True)
+                compressed = compress_for_vision(file_bytes)
+                del file_bytes; gc.collect()
+                return parse_image_with_ai(compressed)
+            print(f"📄 Текст PDF: {len(text)} символов", flush=True)
+            if is_garbled_text(text):
+                print(f"🖼 Кириллица нечитаема — использую Vision", flush=True)
+                del text
+                compressed = compress_for_vision(file_bytes)
+                del file_bytes; gc.collect()
+                return parse_image_with_ai(compressed)
+            data = parse_with_ai(text)
+            del text
+            supplier = (data.get("supplier") or "").strip().lower()
+            if not supplier or supplier in PROMPT_PLACEHOLDERS:
+                print(f"🖼 Поставщик не распознан — пробую Vision", flush=True)
+                compressed = compress_for_vision(file_bytes)
+                del file_bytes; gc.collect()
+                return parse_image_with_ai(compressed)
+            return data
+        elif file_type == "excel":
+            text = extract_text_from_excel(file_bytes)
+            del file_bytes
+            print(f"📊 Текст Excel: {len(text)} символов", flush=True)
+            return parse_with_ai(text)
+        elif file_type == "photo":
+            compressed = compress_for_vision(file_bytes)
+            del file_bytes; gc.collect()
+            return parse_image_with_ai(compressed)
+        else:
+            raise ValueError(f"Неизвестный тип: {file_type}")
+    finally:
+        gc.collect()
 
 
-def process_invoice(msg, file_id: str, file_type: str, filename: str, caption: str = ""):
+# ── Poll worker (Sheets-as-Queue) ──────────────────────────────────────────────
+
+def _older_than(date_str: str, seconds: int) -> bool:
+    try:
+        dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
+        return (datetime.now() - dt).total_seconds() > seconds
+    except Exception:
+        return True
+
+
+def _process_from_registry(row_num: int, row: list):
+    # Схема: #[0], Имя файла[1], Статус[2], Получен[3], Обработан[4], Ошибка[5],
+    #        file_id[6], file_type[7], chat_id[8], Примечание[9], message_id[10]
+    filename   = row[1] if len(row) > 1 else row[0]  # совместимость со старыми строками
+    file_id    = row[6] if len(row) > 6 else row[5]
+    file_type  = row[7] if len(row) > 7 else row[6]
+    chat_id    = int(row[8]) if len(row) > 8 else int(row[7])
+    caption    = row[9] if len(row) > 9 else ""
+    message_id = int(row[10]) if len(row) > 10 and row[10] else None
+
+    def _react(emoji):
+        if message_id:
+            set_reaction(chat_id, message_id, emoji)
+
     print(f"📥 {filename} ({file_type})", flush=True)
-    row_num = registry_find_row(filename)
-    if row_num is None:
-        return  # не зарегистрирован — пропускаем
-
     try:
         data = process_file(file_id, file_type, filename)
         rows = invoice_to_rows(data, filename, caption)
@@ -482,59 +521,68 @@ def process_invoice(msg, file_id: str, file_type: str, filename: str, caption: s
             raise ValueError("Позиции не найдены")
         sheet_append(INVOICES_SHEET, rows)
         registry_update(row_num, "✅")
-        set_reaction(msg, "🏆")
+        _react("🏆")
     except Exception as e:
         err = str(e)
         is_limit = "429" in err or "413" in err
         print(f"❌ {filename}: {err[:200]}", flush=True)
         registry_update(row_num, "❌", err[:200])
         if is_limit:
-            set_reaction(msg, "😴")
-            bot.reply_to(msg, f"😴 Лимит запросов — «{filename}» повторю через 20 мин автоматически.")
-        else:
-            set_reaction(msg, "🤬")
-            bot.reply_to(msg, f"🤬 Не удалось обработать «{filename}»\nОшибка: {err[:150]}")
-
-
-# ── Retry scheduler ────────────────────────────────────────────────────────────
-
-def retry_failed_invoices():
-    print("🔄 Проверяю неудачные счета...", flush=True)
-    failed = registry_get_failed()
-    if not failed:
-        return
-
-    results = {"ok": [], "fail": []}
-    chat_ids = set()
-
-    for item in failed:
-        chat_ids.add(item["chat_id"])
-        try:
-            data = process_file(item["file_id"], item["file_type"], item["filename"])
-            rows = invoice_to_rows(data, item["filename"])
-            if not rows:
-                raise ValueError("Позиции не найдены")
-            sheet_append(INVOICES_SHEET, rows)
-            registry_update(item["row"], "✅")
-            results["ok"].append(item["filename"])
-        except Exception as e:
-            registry_update(item["row"], "❌", str(e)[:200])
-            results["fail"].append(item["filename"])
-
-    for chat_id in chat_ids:
-        lines = []
-        if results["ok"]:
-            lines.append("✅ Успешно обработаны:")
-            lines += [f"  • {f}" for f in results["ok"]]
-        if results["fail"]:
-            lines.append("❌ Снова ошибка:")
-            lines += [f"  • {f}" for f in results["fail"]]
-            lines.append("⏳ Повтор через 20 мин.")
-        if lines:
+            _react("😴")
             try:
-                bot.send_message(chat_id, "\n".join(lines))
+                bot.send_message(chat_id, f"😴 Лимит запросов — «{filename}» повторю через 20 мин.")
             except Exception:
                 pass
+        else:
+            _react("🤬")
+            try:
+                bot.send_message(chat_id, f"🤬 Не удалось обработать «{filename}»\nОшибка: {err[:150]}")
+            except Exception:
+                pass
+
+
+def _poll_once():
+    try:
+        rows = sheet_get_all(REGISTRY_SHEET)
+        for i, row in enumerate(rows[1:], start=2):
+            if len(row) < 3:
+                continue
+            status = row[2] if len(row) > 2 else row[1]  # C=Статус (новая) или B (старая)
+            is_pending = status == "⏳"
+            # ⚙️ старше 3 минут — завис при предыдущем запуске
+            received_col = row[3] if len(row) > 3 else row[2]
+            is_stuck = status == "⚙️" and _older_than(received_col, 180)
+            if not (is_pending or is_stuck):
+                continue
+            # Помечаем ⚙️ до начала обработки — второй поллер не возьмёт
+            sheet_update_cell(REGISTRY_SHEET, i, 3, "⚙️")
+            _process_from_registry(i, row)
+            gc.collect()
+            time.sleep(5)  # пауза между файлами — не бьём Groq лимит
+    except Exception as e:
+        print(f"⚠️ Poll error: {e}", flush=True)
+
+
+def _poll_worker():
+    while True:
+        _poll_once()
+        time.sleep(15)
+
+
+# ── Retry ──────────────────────────────────────────────────────────────────────
+
+def retry_failed_invoices():
+    """Сбрасывает ❌ → ⏳, поллер подхватит в течение 15 секунд."""
+    rows = sheet_get_all(REGISTRY_SHEET)
+    count = 0
+    for i, row in enumerate(rows[1:], start=2):
+        status_col = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
+        if status_col == "❌":
+            sheet_update_cell(REGISTRY_SHEET, i, 3, "⏳")
+            count += 1
+    if count:
+        print(f"🔄 Сброшено {count} файлов → ⏳", flush=True)
+    return count
 
 
 # ── Telegram handlers ──────────────────────────────────────────────────────────
@@ -550,14 +598,15 @@ def on_new_member(msg):
                 "📄 Принимаю счета в виде PDF, Excel (.xlsx/.xls) или фото\n"
                 "🤖 Извлекаю данные с помощью AI: поставщик, номер, дата, позиции, цены\n"
                 "📊 Автоматически записываю всё в Google Таблицу\n"
-                "💬 Подпись к файлу сохраняю в столбец Примечание\n"
                 "🔄 При ошибке — повторяю попытку каждые 20 минут\n\n"
-                "Мои реакции:\n"
-                "👀 — обрабатываю\n"
+                "Как присылать счета:\n"
+                "📎 Отправляйте по одному файлу\n"
+                "✏️ Добавляйте подпись к каждому файлу (например: «срочно», «Сандуны», «АБК») — она попадёт в столбец Примечание и поможет найти счёт в таблице\n\n"
+                "Реакции бота:\n"
+                "👀 — зарегистрировал, скоро обработаю\n"
                 "🏆 — добавлено в таблицу\n"
-                "😴 — лимит, повторю через 20 мин\n"
+                "😴 — лимит запросов, повторю через 20 мин\n"
                 "🤬 — ошибка, загляни в лог\n\n"
-                "Просто скиньте счёт в чат — остальное сделаю сам!\n\n"
                 f"📊 Таблица: https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
             )
             break
@@ -566,7 +615,13 @@ def on_new_member(msg):
 @bot.message_handler(commands=["start", "help"])
 def on_start(msg):
     bot.reply_to(msg,
-        "Привет! Отправь мне счёт (PDF, Excel или фото) — я внесу его в таблицу.\n\n"
+        "Отправляй счета по одному (PDF, Excel или фото).\n"
+        "Добавляй подпись к файлу — она сохранится в столбец Примечание.\n\n"
+        "Реакции:\n"
+        "👀 — зарегистрировал\n"
+        "🏆 — добавлено в таблицу\n"
+        "😴 — лимит, повторю через 20 мин\n"
+        "🤬 — ошибка, загляни в лог\n\n"
         "/retry — повторить обработку счетов с ошибками\n"
         f"📊 Таблица: https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
     )
@@ -574,24 +629,40 @@ def on_start(msg):
 
 @bot.message_handler(commands=["retry"])
 def on_retry(msg):
-    failed = registry_get_failed()
-    if not failed:
-        bot.reply_to(msg, "Нет счетов для повтора.")
+    rows = sheet_get_all(REGISTRY_SHEET)
+    count = sum(1 for r in rows[1:] if len(r) > 2 and r[2] == "❌")
+    if count == 0:
+        bot.reply_to(msg, "Нет счетов с ошибками.")
         return
-    bot.reply_to(msg, f"Запускаю повтор для {len(failed)} счет(ов)...")
     retry_failed_invoices()
+    bot.reply_to(msg, f"↩️ Запускаю повтор для {count} счет(ов)... Результат в течение минуты.")
 
 
 def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
-    """Сразу регистрирует файл и ставит 👀, потом кладёт в очередь обработки."""
-    if registry_is_done(filename):
-        bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
-        return
-    caption = msg.caption or ""
-    set_reaction(msg, "👀")
-    registry_add(filename, file_id, file_type, msg.chat.id)
-    print(f"📋 В очередь: {filename}", flush=True)
-    _invoice_queue.put((msg, file_id, file_type, filename, caption))
+    """Регистрирует файл в Sheets и ставит 👀. Поллер возьмёт через ≤15 секунд."""
+    try:
+        rows = sheet_get_all(REGISTRY_SHEET)
+        for row in rows[1:]:
+            row_filename = row[1] if len(row) > 1 else row[0]
+            row_status = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
+            if row_filename == filename and row_status in ("✅", "⏳", "⚙️"):
+                status = row_status
+                if status == "✅":
+                    bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
+                else:
+                    bot.reply_to(msg, f"⚠️ «{filename}» уже в очереди на обработку.")
+                return
+        caption = msg.caption or ""
+        set_reaction(msg.chat.id, msg.message_id, "👀")
+        registry_add(filename, file_id, file_type, msg.chat.id, msg.message_id, caption)
+        print(f"📋 Зарегистрирован: {filename}", flush=True)
+    except Exception as e:
+        print(f"❌ enqueue {filename}: {e}", flush=True)
+        try:
+            set_reaction(msg.chat.id, msg.message_id, "🤬")
+            bot.send_message(msg.chat.id, f"🤬 Не удалось принять «{filename}». Отправь ещё раз.")
+        except Exception:
+            pass
 
 
 @bot.message_handler(content_types=["document"])
@@ -622,14 +693,14 @@ def webhook():
     msg = json_data.get("message", {}) if json_data else {}
     print(f"📨 keys: {list(msg.keys())}", flush=True)
     update = telebot.types.Update.de_json(json_data)
-    bot.process_new_updates([update])
+    Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
     return "ok", 200
 
 
 @app.route("/retry")
 def manual_retry():
-    retry_failed_invoices()
-    return "Retry triggered", 200
+    count = retry_failed_invoices()
+    return f"Retry triggered: {count} файлов → ⏳", 200
 
 
 @app.route("/")
@@ -654,23 +725,8 @@ if __name__ == "__main__":
         telebot.types.BotCommand("/retry", "Повторить обработку счетов с ошибками"),
     ])
 
-    worker = Thread(target=_queue_worker, daemon=True)
-    worker.start()
-    print("📋 Queue worker запущен", flush=True)
-
-    # Восстанавливаем ⏳ и ❌ файлы после рестарта (без порога времени — очередь пустая)
-    try:
-        rows = sheet_get_all(REGISTRY_SHEET)
-        pending = []
-        for i, row in enumerate(rows[1:], start=2):
-            if len(row) >= 8 and row[1] in ("⏳", "❌"):
-                pending.append({"row": i, "filename": row[0], "file_id": row[5],
-                                "file_type": row[6], "chat_id": int(row[7])})
-        if pending:
-            print(f"🔄 Восстанавливаю {len(pending)} файлов после рестарта...", flush=True)
-            retry_failed_invoices()
-    except Exception as e:
-        print(f"⚠️ Startup recovery error: {e}", flush=True)
+    Thread(target=_poll_worker, daemon=True).start()
+    print("📋 Poll worker запущен", flush=True)
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(retry_failed_invoices, "interval", minutes=20)
