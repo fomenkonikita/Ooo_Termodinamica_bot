@@ -56,6 +56,8 @@ def _queue_worker():
             print(f"⚠️ Queue worker error: {e}", flush=True)
         finally:
             _invoice_queue.task_done()
+            if not _invoice_queue.empty():
+                time.sleep(3)  # пауза между файлами чтобы не упереться в лимит Groq
 
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
