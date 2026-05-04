@@ -181,10 +181,10 @@ def registry_get_failed() -> list[dict]:
             failed.append({"row": i, "filename": row[0], "file_id": row[5],
                            "file_type": row[6], "chat_id": int(row[7])})
         elif status == "⏳":
-            # Ретраим только если завис более 30 минут (защита от гонки с планировщиком)
+            # Ретраим если завис более 5 минут (защита от гонки с воркером)
             try:
                 received = datetime.strptime(row[2], "%d.%m.%Y %H:%M")
-                if (now - received).total_seconds() > 1800:
+                if (now - received).total_seconds() > 300:
                     failed.append({"row": i, "filename": row[0], "file_id": row[5],
                                    "file_type": row[6], "chat_id": int(row[7])})
             except Exception:
@@ -657,6 +657,15 @@ if __name__ == "__main__":
     worker = Thread(target=_queue_worker, daemon=True)
     worker.start()
     print("📋 Queue worker запущен", flush=True)
+
+    # Восстанавливаем ⏳ файлы после рестарта (очередь в памяти потерялась)
+    try:
+        pending = registry_get_failed()
+        if pending:
+            print(f"🔄 Восстанавливаю {len(pending)} файлов после рестарта...", flush=True)
+            retry_failed_invoices()
+    except Exception as e:
+        print(f"⚠️ Startup recovery error: {e}", flush=True)
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(retry_failed_invoices, "interval", minutes=20)
