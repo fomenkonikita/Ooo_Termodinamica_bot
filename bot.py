@@ -658,9 +658,14 @@ if __name__ == "__main__":
     worker.start()
     print("📋 Queue worker запущен", flush=True)
 
-    # Восстанавливаем ⏳ файлы после рестарта (очередь в памяти потерялась)
+    # Восстанавливаем ⏳ и ❌ файлы после рестарта (без порога времени — очередь пустая)
     try:
-        pending = registry_get_failed()
+        rows = sheet_get_all(REGISTRY_SHEET)
+        pending = []
+        for i, row in enumerate(rows[1:], start=2):
+            if len(row) >= 8 and row[1] in ("⏳", "❌"):
+                pending.append({"row": i, "filename": row[0], "file_id": row[5],
+                                "file_type": row[6], "chat_id": int(row[7])})
         if pending:
             print(f"🔄 Восстанавливаю {len(pending)} файлов после рестарта...", flush=True)
             retry_failed_invoices()
