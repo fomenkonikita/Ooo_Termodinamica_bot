@@ -386,7 +386,7 @@ def parse_with_ai(text: str) -> dict:
                     {"role": "system", "content": EXTRACT_PROMPT},
                     {"role": "user", "content": f"Счёт:\n\n{text[:4000]}"},
                 ],
-                max_tokens=2000,
+                max_tokens=4000,
                 temperature=0.1,
             )
             raw = resp.choices[0].message.content.strip()
@@ -412,7 +412,7 @@ def parse_image_with_ai(image_bytes: bytes) -> dict:
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ],
         }],
-        max_tokens=2000,
+        max_tokens=4000,
         temperature=0.1,
     )
     return extract_json(resp.choices[0].message.content.strip())
@@ -696,12 +696,12 @@ def on_pay_callback(call):
         msg_id = int(msg_id_str)
         paid = action == "pay"
         Thread(target=mark_paid, args=(msg_id, call.message.chat.id, paid), daemon=True).start()
+        bot.answer_callback_query(call.id)  # сначала убираем спиннер
         new_action = "unpay" if paid else "pay"
         new_label  = "✅ Оплачено" if paid else "💰 Отметить оплаченным"
         markup = telebot.types.InlineKeyboardMarkup()
         markup.add(telebot.types.InlineKeyboardButton(new_label, callback_data=f"{new_action}:{msg_id}"))
         bot.edit_message_reply_markup(call.message.chat.id, call.message.id, reply_markup=markup)
-        bot.answer_callback_query(call.id)
     except Exception as e:
         print(f"❌ pay callback error: {e}", flush=True)
         try:
