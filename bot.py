@@ -40,7 +40,7 @@ INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номе�
                     "Примечание", "Имя отправителя", "Оплата"]
 
 REGISTRY_HEADERS = ["#", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
-                    "file_id", "file_type", "chat_id", "Примечание", "message_id", "Имя отправителя", "Оплата"]
+                    "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата"]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
@@ -150,9 +150,9 @@ def ensure_sheets():
             "file_id":     row[6],
             "file_type":   row[7],
             "chat_id":     int(row[8]) if row[8] else 0,
-            "message_id":  int(row[10]) if row[10] else None,
+            "message_id":  _row_message_id(row),
             "caption":     row[9],
-            "sender_name": row[11],
+            "sender_name": row[10],
             "row_num":     i,
         }
         _invoice_queue.put(item)
@@ -211,7 +211,7 @@ def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     sheet_append(REGISTRY_SHEET, [[
         seq_num, filename, "⏳", now, "", "", file_id, file_type,
-        str(chat_id), caption, str(message_id), sender_name, ""
+        str(chat_id), caption, sender_name, "", str(message_id)
     ]])
 
 
@@ -599,9 +599,9 @@ def retry_failed_invoices():
             "file_id":     row[6],
             "file_type":   row[7],
             "chat_id":     int(row[8]) if row[8] else 0,
-            "message_id":  int(row[10]) if row[10] else None,
+            "message_id":  _row_message_id(row),
             "caption":     row[9],
-            "sender_name": row[11],
+            "sender_name": row[10],
             "row_num":     i,
         }
         _invoice_queue.put(item)
@@ -619,16 +619,29 @@ def invoices_find_rows(filename: str) -> list:
             if len(row) > 1 and row[1] == filename]
 
 
+def _row_message_id(row: list):
+    """Возвращает message_id из строки реестра.
+    Новый формат: индекс 12 (M). Старый формат: индекс 10 (K)."""
+    row = row + [''] * max(0, 13 - len(row))
+    for idx in (12, 10):
+        val = row[idx]
+        if val:
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                pass
+    return None
+
+
 def mark_paid(message_id: int, chat_id: int, paid: bool):
     try:
         value = "✅" if paid else ""
         rows = sheet_get_all(REGISTRY_SHEET)
         for i, row in enumerate(rows[1:], start=2):
-            row = row + [''] * max(0, 13 - len(row))
-            if row[10] != str(message_id):
+            if _row_message_id(row) != message_id:
                 continue
             filename = row[1]
-            sheet_update_cell(REGISTRY_SHEET, i, 13, value)   # M = Оплата
+            sheet_update_cell(REGISTRY_SHEET, i, 12, value)   # L = Оплата
             for j in invoices_find_rows(filename):
                 sheet_update_cell(INVOICES_SHEET, j, 17, value)   # Q = Оплата
             print(f"💰 {filename} {'оплачен ✅' if paid else 'снята отметка оплаты'}", flush=True)
