@@ -794,7 +794,10 @@ if __name__ == "__main__":
         print(f"⚠️ Sheets init error: {e}", flush=True)
 
     bot.remove_webhook()
-    bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
+    bot.set_webhook(
+        url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
+        allowed_updates=["message", "message_reaction"],
+    )
     print(f"Webhook: {WEBHOOK_URL}/{TELEGRAM_TOKEN}", flush=True)
 
     bot.set_my_commands([
