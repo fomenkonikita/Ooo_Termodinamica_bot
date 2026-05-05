@@ -775,6 +775,26 @@ def webhook():
     json_data = flask_request.get_json()
     update_keys = list(json_data.keys()) if json_data else []
     print(f"📨 update: {update_keys}", flush=True)
+
+    if json_data and "message_reaction" in json_data:
+        r = json_data["message_reaction"]
+        print(f"❤ raw reaction: {r}", flush=True)
+        try:
+            msg_id  = r.get("message_id")
+            chat_id = r.get("chat", {}).get("id")
+            new = [x.get("emoji", "") for x in r.get("new_reaction", []) if x.get("type") == "emoji"]
+            old = [x.get("emoji", "") for x in r.get("old_reaction", []) if x.get("type") == "emoji"]
+            print(f"❤ new={new} old={old}", flush=True)
+            heart_added   = any(e in ("❤", "❤️") for e in new) and not any(e in ("❤", "❤️") for e in old)
+            heart_removed = any(e in ("❤", "❤️") for e in old) and not any(e in ("❤", "❤️") for e in new)
+            if heart_added:
+                Thread(target=mark_paid, args=(msg_id, chat_id, True), daemon=True).start()
+            elif heart_removed:
+                Thread(target=mark_paid, args=(msg_id, chat_id, False), daemon=True).start()
+        except Exception as e:
+            print(f"❌ reaction handling error: {e}", flush=True)
+        return "ok", 200
+
     update = telebot.types.Update.de_json(json_data)
     Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
     return "ok", 200
