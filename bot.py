@@ -806,6 +806,18 @@ def manual_retry():
     return f"Retry triggered: {count} файлов → ⏳", 200
 
 
+@app.route("/debug/webhook")
+def debug_webhook():
+    info = bot.get_webhook_info()
+    return {
+        "url": info.url[-30:] if info.url else None,
+        "allowed_updates": info.allowed_updates,
+        "pending_update_count": info.pending_update_count,
+        "last_error_message": info.last_error_message,
+        "last_error_date": info.last_error_date,
+    }, 200
+
+
 @app.route("/")
 def home():
     return "Invoice bot is running", 200
