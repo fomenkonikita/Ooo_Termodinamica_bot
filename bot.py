@@ -258,9 +258,10 @@ def extract_text_from_pdf(data: bytes) -> tuple[str, bool]:
         parts.append(supplier_line)
     if header_lines:
         parts.append("\n".join(header_lines))
-    parts.append("\n".join(table_rows)[:2500])
     if total_lines:
-        parts.append("ИТОГО: " + total_lines[-1])
+        # Total goes before items so it's never cut off by token limits
+        parts.append("ВСЕГО К ОПЛАТЕ: " + total_lines[-1])
+    parts.append("\n".join(table_rows)[:5000])
     return "\n---\n".join(parts), False
 
 
@@ -383,7 +384,7 @@ def parse_with_ai(text: str) -> dict:
                 model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": EXTRACT_PROMPT},
-                    {"role": "user", "content": f"Счёт:\n\n{text[:2000]}"},
+                    {"role": "user", "content": f"Счёт:\n\n{text[:4000]}"},
                 ],
                 max_tokens=2000,
                 temperature=0.1,
