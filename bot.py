@@ -486,6 +486,26 @@ def set_reaction(chat_id: int, message_id: int, emoji: str):
         print(f"⚠️ Reaction error: {e}", flush=True)
 
 
+_BANK_KEYWORDS    = ("банк", "сбербанк", "втб", "тинькофф", "альфа-банк", "открытие", "бик", "р/с")
+_BUYER_KEYWORDS   = ("термодинамика",)
+_BAD_INV_RE       = re.compile(r'^\d{10,}$')   # р/с вместо номера счёта
+
+def _bad_extraction_reason(data: dict) -> str:
+    """Возвращает причину если AI вернул мусор, иначе пустую строку."""
+    supplier = (data.get("supplier") or "").strip().lower()
+    inv_num  = str(data.get("invoice_number") or "").strip()
+
+    if not supplier or supplier in PROMPT_PLACEHOLDERS:
+        return "Поставщик не распознан"
+    if any(k in supplier for k in _BANK_KEYWORDS):
+        return f"Поставщик — банк ({supplier[:40]})"
+    if any(k in supplier for k in _BUYER_KEYWORDS):
+        return f"Поставщик — покупатель ({supplier[:40]})"
+    if _BAD_INV_RE.match(inv_num):
+        return f"Номер счёта похож на р/с ({inv_num[:20]})"
+    return ""
+
+
 def process_file(file_id: str, file_type: str, filename: str) -> dict:
     file_bytes = download_file(file_id)
     try:
@@ -505,9 +525,9 @@ def process_file(file_id: str, file_type: str, filename: str) -> dict:
                 return parse_image_with_ai(compressed)
             data = parse_with_ai(text)
             del text
-            supplier = (data.get("supplier") or "").strip().lower()
-            if not supplier or supplier in PROMPT_PLACEHOLDERS:
-                print(f"🖼 Поставщик не распознан — пробую Vision", flush=True)
+            reason = _bad_extraction_reason(data)
+            if reason:
+                print(f"🖼 {reason} — пробую Vision", flush=True)
                 compressed = compress_for_vision(file_bytes)
                 del file_bytes; gc.collect()
                 return parse_image_with_ai(compressed)
