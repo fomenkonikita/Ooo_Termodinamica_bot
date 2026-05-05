@@ -40,7 +40,7 @@ INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номе�
                     "Примечание", "Имя отправителя", "Оплата"]
 
 REGISTRY_HEADERS = ["#", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
-                    "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата"]
+                    "file_id", "file_type", "chat_id", "Примечание", "message_id", "Имя отправителя", "Оплата"]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
@@ -620,20 +620,22 @@ def invoices_find_rows(filename: str) -> list:
 
 
 def mark_paid(message_id: int, chat_id: int, paid: bool):
-    value = "✅" if paid else ""
-    rows = sheet_get_all(REGISTRY_SHEET)
-    for i, row in enumerate(rows[1:], start=2):
-        row = row + [''] * max(0, 13 - len(row))
-        if row[10] != str(message_id):
-            continue
-        filename = row[1]
-        sheet_update_cell(REGISTRY_SHEET, i, 13, value)   # M = Оплата
-        for j in invoices_find_rows(filename):
-            sheet_update_cell(INVOICES_SHEET, j, 17, value)   # Q = Оплата
-        status = "оплачен ✅" if paid else "снята отметка оплаты"
-        print(f"💰 {filename} {status}", flush=True)
-        return
-    print(f"⚠️ mark_paid: message_id={message_id} не найден в реестре", flush=True)
+    try:
+        value = "✅" if paid else ""
+        rows = sheet_get_all(REGISTRY_SHEET)
+        for i, row in enumerate(rows[1:], start=2):
+            row = row + [''] * max(0, 13 - len(row))
+            if row[10] != str(message_id):
+                continue
+            filename = row[1]
+            sheet_update_cell(REGISTRY_SHEET, i, 13, value)   # M = Оплата
+            for j in invoices_find_rows(filename):
+                sheet_update_cell(INVOICES_SHEET, j, 17, value)   # Q = Оплата
+            print(f"💰 {filename} {'оплачен ✅' if paid else 'снята отметка оплаты'}", flush=True)
+            return
+        print(f"⚠️ mark_paid: message_id={message_id} не найден в реестре", flush=True)
+    except Exception as e:
+        print(f"❌ mark_paid error: {e}", flush=True)
 
 
 @bot.message_reaction_handler(func=lambda r: True)
