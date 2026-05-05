@@ -5,6 +5,7 @@ import re
 import base64
 import gc
 import time
+import queue as _queue_module
 from datetime import datetime
 from threading import Thread, Lock
 
@@ -44,6 +45,9 @@ REGISTRY_HEADERS = ["#", "Имя файла", "Статус", "Получен", 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
 app = Flask(__name__)
+
+_invoice_queue = _queue_module.Queue()
+_enqueue_lock = Lock()
 
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
@@ -123,6 +127,28 @@ def ensure_sheets():
     ).execute()
 
     _migrate_registry(service)
+
+    # Подхватываем незавершённые файлы после рестарта
+    rows = sheet_get_all(REGISTRY_SHEET)
+    recovered = 0
+    for i, row in enumerate(rows[1:], start=2):
+        row = row + [''] * max(0, 11 - len(row))
+        if row[2] not in ("⏳", "⚙️"):
+            continue
+        item = {
+            "filename":   row[1],
+            "file_id":    row[6],
+            "file_type":  row[7],
+            "chat_id":    int(row[8]) if row[8] else 0,
+            "message_id": int(row[10]) if row[10] else None,
+            "caption":    row[9],
+            "row_num":    i,
+        }
+        _invoice_queue.put(item)
+        recovered += 1
+    if recovered:
+        print(f"♻️ Восстановлено {recovered} файлов из реестра", flush=True)
+
     print("✅ Таблица готова", flush=True)
 
 
@@ -489,44 +515,37 @@ def process_file(file_id: str, file_type: str, filename: str) -> dict:
         gc.collect()
 
 
-# ── Poll worker (Sheets-as-Queue) ──────────────────────────────────────────────
+# ── Queue worker ───────────────────────────────────────────────────────────────
 
-def _older_than(date_str: str, seconds: int) -> bool:
-    try:
-        dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
-        return (datetime.now() - dt).total_seconds() > seconds
-    except Exception:
-        return True
-
-
-def _process_from_registry(row_num: int, row: list):
-    # Схема: #[0], Имя файла[1], Статус[2], Получен[3], Обработан[4], Ошибка[5],
-    #        file_id[6], file_type[7], chat_id[8], Примечание[9], message_id[10]
-    filename   = row[1] if len(row) > 1 else row[0]  # совместимость со старыми строками
-    file_id    = row[6] if len(row) > 6 else row[5]
-    file_type  = row[7] if len(row) > 7 else row[6]
-    chat_id    = int(row[8]) if len(row) > 8 else int(row[7])
-    caption    = row[9] if len(row) > 9 else ""
-    message_id = int(row[10]) if len(row) > 10 and row[10] else None
+def _process_item(item: dict):
+    filename   = item["filename"]
+    file_id    = item["file_id"]
+    file_type  = item["file_type"]
+    chat_id    = item["chat_id"]
+    message_id = item["message_id"]
+    caption    = item["caption"]
+    row_num    = item["row_num"]
 
     def _react(emoji):
         if message_id:
             set_reaction(chat_id, message_id, emoji)
 
-    print(f"📥 {filename} ({file_type})", flush=True)
+    print(f"📥 {filename} ({file_type}) msg_id={message_id}", flush=True)
     try:
         data = process_file(file_id, file_type, filename)
         rows = invoice_to_rows(data, filename, caption)
         if not rows:
             raise ValueError("Позиции не найдены")
         sheet_append(INVOICES_SHEET, rows)
-        registry_update(row_num, "✅")
+        if row_num:
+            registry_update(row_num, "✅")
         _react("🏆")
     except Exception as e:
         err = str(e)
         is_limit = "429" in err or "413" in err
         print(f"❌ {filename}: {err[:200]}", flush=True)
-        registry_update(row_num, "❌", err[:200])
+        if row_num:
+            registry_update(row_num, "❌", err[:200])
         if is_limit:
             _react("😴")
             try:
@@ -541,47 +560,41 @@ def _process_from_registry(row_num: int, row: list):
                 pass
 
 
-def _poll_once():
-    try:
-        rows = sheet_get_all(REGISTRY_SHEET)
-        for i, row in enumerate(rows[1:], start=2):
-            if len(row) < 3:
-                continue
-            status = row[2] if len(row) > 2 else row[1]  # C=Статус (новая) или B (старая)
-            is_pending = status == "⏳"
-            # ⚙️ старше 3 минут — завис при предыдущем запуске
-            received_col = row[3] if len(row) > 3 else row[2]
-            is_stuck = status == "⚙️" and _older_than(received_col, 180)
-            if not (is_pending or is_stuck):
-                continue
-            # Помечаем ⚙️ до начала обработки — второй поллер не возьмёт
-            sheet_update_cell(REGISTRY_SHEET, i, 3, "⚙️")
-            _process_from_registry(i, row)
-            gc.collect()
-            time.sleep(5)  # пауза между файлами — не бьём Groq лимит
-    except Exception as e:
-        print(f"⚠️ Poll error: {e}", flush=True)
-
-
-def _poll_worker():
+def _queue_worker():
     while True:
-        _poll_once()
-        time.sleep(15)
+        item = _invoice_queue.get()
+        try:
+            _process_item(item)
+        finally:
+            _invoice_queue.task_done()
+            gc.collect()
+            time.sleep(3)
 
 
 # ── Retry ──────────────────────────────────────────────────────────────────────
 
 def retry_failed_invoices():
-    """Сбрасывает ❌ → ⏳, поллер подхватит в течение 15 секунд."""
+    """Сбрасывает ❌ → ⏳ и кладёт файлы обратно в очередь."""
     rows = sheet_get_all(REGISTRY_SHEET)
     count = 0
     for i, row in enumerate(rows[1:], start=2):
-        status_col = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
-        if status_col == "❌":
-            sheet_update_cell(REGISTRY_SHEET, i, 3, "⏳")
-            count += 1
+        row = row + [''] * max(0, 11 - len(row))
+        if row[2] != "❌":
+            continue
+        sheet_update_cell(REGISTRY_SHEET, i, 3, "⏳")
+        item = {
+            "filename":   row[1],
+            "file_id":    row[6],
+            "file_type":  row[7],
+            "chat_id":    int(row[8]) if row[8] else 0,
+            "message_id": int(row[10]) if row[10] else None,
+            "caption":    row[9],
+            "row_num":    i,
+        }
+        _invoice_queue.put(item)
+        count += 1
     if count:
-        print(f"🔄 Сброшено {count} файлов → ⏳", flush=True)
+        print(f"🔄 Сброшено {count} файлов → очередь", flush=True)
     return count
 
 
@@ -639,23 +652,35 @@ def on_retry(msg):
 
 
 def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
-    """Регистрирует файл в Sheets и ставит 👀. Поллер возьмёт через ≤15 секунд."""
+    """Регистрирует файл в Sheets и кладёт в очередь на обработку."""
     try:
-        rows = sheet_get_all(REGISTRY_SHEET)
-        for row in rows[1:]:
-            row_filename = row[1] if len(row) > 1 else row[0]
-            row_status = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
-            if row_filename == filename and row_status in ("✅", "⏳", "⚙️"):
-                status = row_status
-                if status == "✅":
-                    bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
-                else:
-                    bot.reply_to(msg, f"⚠️ «{filename}» уже в очереди на обработку.")
-                return
-        caption = msg.caption or ""
+        with _enqueue_lock:
+            rows = sheet_get_all(REGISTRY_SHEET)
+            for row in rows[1:]:
+                row_filename = row[1] if len(row) > 1 else row[0]
+                row_status   = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
+                if row_filename == filename and row_status in ("✅", "⏳", "⚙️"):
+                    if row_status == "✅":
+                        bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
+                    else:
+                        bot.reply_to(msg, f"⚠️ «{filename}» уже в очереди на обработку.")
+                    return
+            caption = msg.caption or ""
+            print(f"📎 {filename} caption={caption!r}", flush=True)
+            registry_add(filename, file_id, file_type, msg.chat.id, msg.message_id, caption)
+            row_num = registry_find_row(filename)
+            item = {
+                "filename":   filename,
+                "file_id":    file_id,
+                "file_type":  file_type,
+                "chat_id":    msg.chat.id,
+                "message_id": msg.message_id,
+                "caption":    caption,
+                "row_num":    row_num,
+            }
+            _invoice_queue.put(item)
         set_reaction(msg.chat.id, msg.message_id, "👀")
-        registry_add(filename, file_id, file_type, msg.chat.id, msg.message_id, caption)
-        print(f"📋 Зарегистрирован: {filename}", flush=True)
+        print(f"📋 Зарегистрирован: {filename} row={row_num}", flush=True)
     except Exception as e:
         print(f"❌ enqueue {filename}: {e}", flush=True)
         try:
@@ -725,8 +750,8 @@ if __name__ == "__main__":
         telebot.types.BotCommand("/retry", "Повторить обработку счетов с ошибками"),
     ])
 
-    Thread(target=_poll_worker, daemon=True).start()
-    print("📋 Poll worker запущен", flush=True)
+    Thread(target=_queue_worker, daemon=True).start()
+    print("📋 Queue worker запущен", flush=True)
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(retry_failed_invoices, "interval", minutes=20)
