@@ -37,10 +37,10 @@ REGISTRY_SHEET = "Реестр"
 INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номер счёта", "Дата счёта", "Позиция в счёте",
                     "Наименование", "Артикул/Описание", "Ед.изм.", "Кол-во",
                     "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете",
-                    "Примечание"]
+                    "Примечание", "Имя отправителя", "Оплата"]
 
 REGISTRY_HEADERS = ["#", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
-                    "file_id", "file_type", "chat_id", "Примечание"]
+                    "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата"]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
@@ -48,6 +48,16 @@ app = Flask(__name__)
 
 _invoice_queue = _queue_module.Queue()
 _enqueue_lock = Lock()
+
+
+def _sender_name(user) -> str:
+    if user is None:
+        return ""
+    parts = [user.first_name or "", user.last_name or ""]
+    full = " ".join(p for p in parts if p).strip()
+    if user.username:
+        return f"{full} (@{user.username})" if full else f"@{user.username}"
+    return full
 
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
@@ -132,17 +142,18 @@ def ensure_sheets():
     rows = sheet_get_all(REGISTRY_SHEET)
     recovered = 0
     for i, row in enumerate(rows[1:], start=2):
-        row = row + [''] * max(0, 11 - len(row))
+        row = row + [''] * max(0, 13 - len(row))
         if row[2] not in ("⏳", "⚙️"):
             continue
         item = {
-            "filename":   row[1],
-            "file_id":    row[6],
-            "file_type":  row[7],
-            "chat_id":    int(row[8]) if row[8] else 0,
-            "message_id": int(row[10]) if row[10] else None,
-            "caption":    row[9],
-            "row_num":    i,
+            "filename":    row[1],
+            "file_id":     row[6],
+            "file_type":   row[7],
+            "chat_id":     int(row[8]) if row[8] else 0,
+            "message_id":  int(row[10]) if row[10] else None,
+            "caption":     row[9],
+            "sender_name": row[11],
+            "row_num":     i,
         }
         _invoice_queue.put(item)
         recovered += 1
@@ -194,13 +205,13 @@ def registry_find_row(filename: str) -> int | None:
 
 
 def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
-                 message_id: int, caption: str = ""):
+                 message_id: int, caption: str = "", sender_name: str = ""):
     rows = sheet_get_all(REGISTRY_SHEET)
     seq_num = len(rows)   # header — строка 1; первая запись → #1, вторая → #2 ...
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     sheet_append(REGISTRY_SHEET, [[
         seq_num, filename, "⏳", now, "", "", file_id, file_type,
-        str(chat_id), caption, str(message_id)
+        str(chat_id), caption, str(message_id), sender_name, ""
     ]])
 
 
@@ -413,7 +424,7 @@ def clean_field(val: str, fallback: str = "—") -> str:
         return fallback
     return val.strip()
 
-def invoice_to_rows(data: dict, filename: str, caption: str = "") -> list:
+def invoice_to_rows(data: dict, filename: str, caption: str = "", sender_name: str = "") -> list:
     today = datetime.now().strftime("%d.%m.%Y")
     supplier = clean_field(data.get("supplier", ""))
     inv_num = clean_field(data.get("invoice_number", ""))
@@ -443,7 +454,7 @@ def invoice_to_rows(data: dict, filename: str, caption: str = "") -> list:
             i, filename, supplier, inv_num, inv_date,
             item.get("pos", i), item.get("name", "—"), item.get("article", ""),
             item.get("unit", "—"), qty, price, line_total,
-            today, total_amount, caption,
+            today, total_amount, caption, sender_name, "",
         ])
 
     if items_sum > 0 and (total_amount == 0 or total_amount < items_sum * 0.6):
@@ -523,8 +534,9 @@ def _process_item(item: dict):
     file_type  = item["file_type"]
     chat_id    = item["chat_id"]
     message_id = item["message_id"]
-    caption    = item["caption"]
-    row_num    = item["row_num"]
+    caption     = item["caption"]
+    sender_name = item.get("sender_name", "")
+    row_num     = item["row_num"]
 
     def _react(emoji):
         if message_id:
@@ -533,7 +545,7 @@ def _process_item(item: dict):
     print(f"📥 {filename} ({file_type}) msg_id={message_id}", flush=True)
     try:
         data = process_file(file_id, file_type, filename)
-        rows = invoice_to_rows(data, filename, caption)
+        rows = invoice_to_rows(data, filename, caption, sender_name)
         if not rows:
             raise ValueError("Позиции не найдены")
         sheet_append(INVOICES_SHEET, rows)
@@ -578,24 +590,64 @@ def retry_failed_invoices():
     rows = sheet_get_all(REGISTRY_SHEET)
     count = 0
     for i, row in enumerate(rows[1:], start=2):
-        row = row + [''] * max(0, 11 - len(row))
+        row = row + [''] * max(0, 13 - len(row))
         if row[2] != "❌":
             continue
         sheet_update_cell(REGISTRY_SHEET, i, 3, "⏳")
         item = {
-            "filename":   row[1],
-            "file_id":    row[6],
-            "file_type":  row[7],
-            "chat_id":    int(row[8]) if row[8] else 0,
-            "message_id": int(row[10]) if row[10] else None,
-            "caption":    row[9],
-            "row_num":    i,
+            "filename":    row[1],
+            "file_id":     row[6],
+            "file_type":   row[7],
+            "chat_id":     int(row[8]) if row[8] else 0,
+            "message_id":  int(row[10]) if row[10] else None,
+            "caption":     row[9],
+            "sender_name": row[11],
+            "row_num":     i,
         }
         _invoice_queue.put(item)
         count += 1
     if count:
         print(f"🔄 Сброшено {count} файлов → очередь", flush=True)
     return count
+
+
+# ── Paid status ────────────────────────────────────────────────────────────────
+
+def invoices_find_rows(filename: str) -> list:
+    rows = sheet_get_all(INVOICES_SHEET)
+    return [i for i, row in enumerate(rows[1:], start=2)
+            if len(row) > 1 and row[1] == filename]
+
+
+def mark_paid(message_id: int, chat_id: int, paid: bool):
+    value = "✅" if paid else ""
+    rows = sheet_get_all(REGISTRY_SHEET)
+    for i, row in enumerate(rows[1:], start=2):
+        row = row + [''] * max(0, 13 - len(row))
+        if row[10] != str(message_id):
+            continue
+        filename = row[1]
+        sheet_update_cell(REGISTRY_SHEET, i, 13, value)   # M = Оплата
+        for j in invoices_find_rows(filename):
+            sheet_update_cell(INVOICES_SHEET, j, 17, value)   # Q = Оплата
+        status = "оплачен ✅" if paid else "снята отметка оплаты"
+        print(f"💰 {filename} {status}", flush=True)
+        return
+    print(f"⚠️ mark_paid: message_id={message_id} не найден в реестре", flush=True)
+
+
+@bot.message_reaction_handler(func=lambda r: True)
+def on_reaction(reaction):
+    new = [r.emoji for r in (reaction.new_reaction or [])]
+    old = [r.emoji for r in (reaction.old_reaction or [])]
+    heart_added   = "❤" in new and "❤" not in old
+    heart_removed = "❤" in old and "❤" not in new
+    if heart_added:
+        Thread(target=mark_paid,
+               args=(reaction.message_id, reaction.chat.id, True), daemon=True).start()
+    elif heart_removed:
+        Thread(target=mark_paid,
+               args=(reaction.message_id, reaction.chat.id, False), daemon=True).start()
 
 
 # ── Telegram handlers ──────────────────────────────────────────────────────────
@@ -665,18 +717,20 @@ def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
                     else:
                         bot.reply_to(msg, f"⚠️ «{filename}» уже в очереди на обработку.")
                     return
-            caption = msg.caption or ""
-            print(f"📎 {filename} caption={caption!r}", flush=True)
-            registry_add(filename, file_id, file_type, msg.chat.id, msg.message_id, caption)
+            caption     = msg.caption or ""
+            sender_name = _sender_name(msg.from_user)
+            print(f"📎 {filename} caption={caption!r} from={sender_name!r}", flush=True)
+            registry_add(filename, file_id, file_type, msg.chat.id, msg.message_id, caption, sender_name)
             row_num = registry_find_row(filename)
             item = {
-                "filename":   filename,
-                "file_id":    file_id,
-                "file_type":  file_type,
-                "chat_id":    msg.chat.id,
-                "message_id": msg.message_id,
-                "caption":    caption,
-                "row_num":    row_num,
+                "filename":    filename,
+                "file_id":     file_id,
+                "file_type":   file_type,
+                "chat_id":     msg.chat.id,
+                "message_id":  msg.message_id,
+                "caption":     caption,
+                "sender_name": sender_name,
+                "row_num":     row_num,
             }
             _invoice_queue.put(item)
         set_reaction(msg.chat.id, msg.message_id, "👀")
@@ -715,8 +769,6 @@ def on_photo(msg):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     json_data = flask_request.get_json()
-    msg = json_data.get("message", {}) if json_data else {}
-    print(f"📨 keys: {list(msg.keys())}", flush=True)
     update = telebot.types.Update.de_json(json_data)
     Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
     return "ok", 200
