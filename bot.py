@@ -638,16 +638,20 @@ def mark_paid(message_id: int, chat_id: int, paid: bool):
 
 @bot.message_reaction_handler(func=lambda r: True)
 def on_reaction(reaction):
-    new = [r.emoji for r in (reaction.new_reaction or [])]
-    old = [r.emoji for r in (reaction.old_reaction or [])]
-    heart_added   = "❤" in new and "❤" not in old
-    heart_removed = "❤" in old and "❤" not in new
-    if heart_added:
-        Thread(target=mark_paid,
-               args=(reaction.message_id, reaction.chat.id, True), daemon=True).start()
-    elif heart_removed:
-        Thread(target=mark_paid,
-               args=(reaction.message_id, reaction.chat.id, False), daemon=True).start()
+    try:
+        new = [r.emoji for r in (reaction.new_reaction or []) if hasattr(r, "emoji")]
+        old = [r.emoji for r in (reaction.old_reaction or []) if hasattr(r, "emoji")]
+        print(f"❤ reaction msg_id={reaction.message_id} new={new} old={old}", flush=True)
+        heart_added   = any(e in ("❤", "❤️") for e in new) and not any(e in ("❤", "❤️") for e in old)
+        heart_removed = any(e in ("❤", "❤️") for e in old) and not any(e in ("❤", "❤️") for e in new)
+        if heart_added:
+            Thread(target=mark_paid,
+                   args=(reaction.message_id, reaction.chat.id, True), daemon=True).start()
+        elif heart_removed:
+            Thread(target=mark_paid,
+                   args=(reaction.message_id, reaction.chat.id, False), daemon=True).start()
+    except Exception as e:
+        print(f"❌ on_reaction error: {e}", flush=True)
 
 
 # ── Telegram handlers ──────────────────────────────────────────────────────────
@@ -769,6 +773,8 @@ def on_photo(msg):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     json_data = flask_request.get_json()
+    update_keys = list(json_data.keys()) if json_data else []
+    print(f"📨 update: {update_keys}", flush=True)
     update = telebot.types.Update.de_json(json_data)
     Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
     return "ok", 200
