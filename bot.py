@@ -552,6 +552,23 @@ def _process_item(item: dict):
         if row_num:
             registry_update(row_num, "✅")
         _react("🏆")
+        try:
+            supplier = (data.get("supplier") or "—").strip()
+            total = data.get("total_amount", 0) or 0
+            try:
+                total_str = f"{float(total):,.0f}".replace(",", " ")
+            except Exception:
+                total_str = str(total)
+            text = (f"🏆 «{filename}» добавлен в таблицу\n"
+                    f"Поставщик: {supplier}\n"
+                    f"Сумма: {total_str} ₽")
+            markup = telebot.types.InlineKeyboardMarkup()
+            markup.add(telebot.types.InlineKeyboardButton(
+                "💰 Отметить оплаченным", callback_data=f"pay:{message_id}"
+            ))
+            bot.send_message(chat_id, text, reply_markup=markup)
+        except Exception as ex:
+            print(f"⚠️ send pay button error: {ex}", flush=True)
     except Exception as e:
         err = str(e)
         is_limit = "429" in err or "413" in err
@@ -651,22 +668,25 @@ def mark_paid(message_id: int, chat_id: int, paid: bool):
         print(f"❌ mark_paid error: {e}", flush=True)
 
 
-@bot.message_reaction_handler(func=lambda r: True)
-def on_reaction(reaction):
+@bot.callback_query_handler(func=lambda c: c.data.startswith(("pay:", "unpay:")))
+def on_pay_callback(call):
     try:
-        new = [r.emoji for r in (reaction.new_reaction or []) if hasattr(r, "emoji")]
-        old = [r.emoji for r in (reaction.old_reaction or []) if hasattr(r, "emoji")]
-        print(f"❤ reaction msg_id={reaction.message_id} new={new} old={old}", flush=True)
-        heart_added   = any(e in ("❤", "❤️") for e in new) and not any(e in ("❤", "❤️") for e in old)
-        heart_removed = any(e in ("❤", "❤️") for e in old) and not any(e in ("❤", "❤️") for e in new)
-        if heart_added:
-            Thread(target=mark_paid,
-                   args=(reaction.message_id, reaction.chat.id, True), daemon=True).start()
-        elif heart_removed:
-            Thread(target=mark_paid,
-                   args=(reaction.message_id, reaction.chat.id, False), daemon=True).start()
+        action, msg_id_str = call.data.split(":", 1)
+        msg_id = int(msg_id_str)
+        paid = action == "pay"
+        Thread(target=mark_paid, args=(msg_id, call.message.chat.id, paid), daemon=True).start()
+        new_action = "unpay" if paid else "pay"
+        new_label  = "✅ Оплачено" if paid else "💰 Отметить оплаченным"
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.add(telebot.types.InlineKeyboardButton(new_label, callback_data=f"{new_action}:{msg_id}"))
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.id, reply_markup=markup)
+        bot.answer_callback_query(call.id)
     except Exception as e:
-        print(f"❌ on_reaction error: {e}", flush=True)
+        print(f"❌ pay callback error: {e}", flush=True)
+        try:
+            bot.answer_callback_query(call.id, "Ошибка")
+        except Exception:
+            pass
 
 
 # ── Telegram handlers ──────────────────────────────────────────────────────────
@@ -791,25 +811,6 @@ def webhook():
     update_keys = list(json_data.keys()) if json_data else []
     print(f"📨 update: {update_keys}", flush=True)
 
-    if json_data and "message_reaction" in json_data:
-        r = json_data["message_reaction"]
-        print(f"❤ raw reaction: {r}", flush=True)
-        try:
-            msg_id  = r.get("message_id")
-            chat_id = r.get("chat", {}).get("id")
-            new = [x.get("emoji", "") for x in r.get("new_reaction", []) if x.get("type") == "emoji"]
-            old = [x.get("emoji", "") for x in r.get("old_reaction", []) if x.get("type") == "emoji"]
-            print(f"❤ new={new} old={old}", flush=True)
-            heart_added   = any(e in ("❤", "❤️") for e in new) and not any(e in ("❤", "❤️") for e in old)
-            heart_removed = any(e in ("❤", "❤️") for e in old) and not any(e in ("❤", "❤️") for e in new)
-            if heart_added:
-                Thread(target=mark_paid, args=(msg_id, chat_id, True), daemon=True).start()
-            elif heart_removed:
-                Thread(target=mark_paid, args=(msg_id, chat_id, False), daemon=True).start()
-        except Exception as e:
-            print(f"❌ reaction handling error: {e}", flush=True)
-        return "ok", 200
-
     update = telebot.types.Update.de_json(json_data)
     Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
     return "ok", 200
@@ -849,7 +850,7 @@ if __name__ == "__main__":
     bot.remove_webhook()
     bot.set_webhook(
         url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
-        allowed_updates=["message", "message_reaction"],
+        allowed_updates=["message", "callback_query"],
     )
     print(f"Webhook: {WEBHOOK_URL}/{TELEGRAM_TOKEN}", flush=True)
 
