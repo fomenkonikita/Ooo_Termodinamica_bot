@@ -6,7 +6,10 @@ import base64
 import gc
 import time
 import queue as _queue_module
-from datetime import datetime
+from datetime import datetime, timedelta
+
+def _now():
+    return datetime.utcnow() + timedelta(hours=5)
 from threading import Thread, Lock
 
 import requests
@@ -208,7 +211,7 @@ def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
                  message_id: int, caption: str = "", sender_name: str = ""):
     rows = sheet_get_all(REGISTRY_SHEET)
     seq_num = len(rows)
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    now = _now().strftime("%d.%m.%Y %H:%M")
     # A=# B=Поставщик C=Сумма D=Имя E=Статус F=Получен G=Обработан H=Ошибка
     # I=file_id J=file_type K=chat_id L=Примечание M=Имя отправителя N=Оплата O=message_id
     sheet_append(REGISTRY_SHEET, [[
@@ -219,7 +222,7 @@ def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
 
 def registry_update(row_num: int, status: str, error: str = "",
                     supplier: str = "", total: str = ""):
-    now = datetime.now().strftime("%d.%m.%Y %H:%M") if status == "✅" else ""
+    now = _now().strftime("%d.%m.%Y %H:%M") if status == "✅" else ""
     sheet_update_cell(REGISTRY_SHEET, row_num, 5, status)   # E = Статус
     sheet_update_cell(REGISTRY_SHEET, row_num, 7, now)      # G = Обработан
     sheet_update_cell(REGISTRY_SHEET, row_num, 8, error)    # H = Ошибка
@@ -456,7 +459,7 @@ def clean_field(val: str, fallback: str = "—") -> str:
     return val.strip()
 
 def invoice_to_rows(data: dict, filename: str, caption: str = "", sender_name: str = "") -> list:
-    today = datetime.now().strftime("%d.%m.%Y")
+    today = _now().strftime("%d.%m.%Y")
     supplier = clean_field(data.get("supplier", ""))
     inv_num = clean_field(data.get("invoice_number", ""))
     inv_date = clean_field(data.get("invoice_date", ""))
@@ -823,7 +826,7 @@ def on_document(msg):
 @bot.message_handler(content_types=["photo"])
 def on_photo(msg):
     photo = msg.photo[-1]
-    filename = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    filename = f"photo_{_now().strftime('%Y%m%d_%H%M%S')}.jpg"
     enqueue_invoice(msg, photo.file_id, "photo", filename)
 
 
