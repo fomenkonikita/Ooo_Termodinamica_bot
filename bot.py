@@ -362,11 +362,21 @@ EXTRACT_PROMPT = """Ты парсер счетов-фактур и наклад�
 - Если поле неизвестно — пустая строка или 0"""
 
 
-_INVALID_ESCAPE_RE = re.compile(r'\\([^"\\/bfnrtu])')
-
-def _sanitize_json(s: str) -> str:
-    """Заменяет невалидные escape-последовательности (\\т, \\С и т.п.) на двойной слеш."""
-    return _INVALID_ESCAPE_RE.sub(r'\\\\\1', s)
+def _repair_json(s: str) -> str:
+    """Итеративно исправляет невалидные escape-символы используя позицию из исключения."""
+    for _ in range(30):
+        try:
+            json.loads(s)
+            return s
+        except json.JSONDecodeError as e:
+            if 'escape' not in str(e).lower() or e.pos is None:
+                raise
+            pos = e.pos  # позиция обратного слеша
+            if pos < len(s) and s[pos] == '\\':
+                s = s[:pos] + '\\\\' + s[pos + 1:]
+            else:
+                raise
+    raise ValueError("Не удалось исправить JSON escapes")
 
 def extract_json(text: str) -> dict:
     start = text.find("{")
@@ -382,8 +392,10 @@ def extract_json(text: str) -> dict:
                 raw = text[start:i + 1]
                 try:
                     return json.loads(raw)
-                except json.JSONDecodeError:
-                    return json.loads(_sanitize_json(raw))
+                except json.JSONDecodeError as e:
+                    if 'escape' in str(e).lower():
+                        return json.loads(_repair_json(raw))
+                    raise
     raise ValueError("Незакрытый JSON")
 
 
