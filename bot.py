@@ -858,7 +858,7 @@ def on_pending(msg):
     pending = []
     total_sum = 0.0
     for row in rows[1:]:
-        row = row + [''] * max(0, 15 - len(row))
+        row = row + [''] * max(0, 16 - len(row))
         if row[13] != "⏳":
             continue
         supplier = row[1] or "—"
@@ -867,8 +867,10 @@ def on_pending(msg):
             amount = float(re.sub(r'[^\d.]', '', amount_str.replace(',', '.')))
         except Exception:
             amount = 0.0
-        link = row[15] if len(row) > 15 and row[15] else _tg_link(_row_chat_id(row), _row_message_id(row) or 0)
-        pending.append((supplier, amount, link))
+        file_id   = row[8]
+        file_type = row[9]
+        msg_id    = _row_message_id(row) or 0
+        pending.append((supplier, amount, file_id, file_type, msg_id))
         total_sum += amount
 
     if not pending:
@@ -876,18 +878,60 @@ def on_pending(msg):
         return
 
     lines = ["📋 Счета к оплате:\n"]
-    for n, (supplier, amount, link) in enumerate(pending, 1):
+    markup = telebot.types.InlineKeyboardMarkup(row_width=3)
+    btn_row = []
+    for n, (supplier, amount, file_id, file_type, msg_id) in enumerate(pending, 1):
         amount_fmt = f"{amount:,.0f}".replace(",", " ")
-        sup_escaped = supplier.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        if link:
-            line = f'{n}. <a href="{link}">{sup_escaped}</a> — {amount_fmt} ₽'
-        else:
-            line = f"{n}. {sup_escaped} — {amount_fmt} ₽"
-        lines.append(line)
+        lines.append(f"{n}. {supplier} — {amount_fmt} ₽")
+        if file_id and msg_id:
+            btn_row.append(telebot.types.InlineKeyboardButton(
+                f"📎 #{n}", callback_data=f"show:{msg_id}"
+            ))
 
     total_fmt = f"{total_sum:,.0f}".replace(",", " ")
     lines.append(f"\nИтого: {total_fmt} ₽")
-    bot.reply_to(msg, "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+    if btn_row:
+        markup.add(*btn_row)
+        bot.reply_to(msg, "\n".join(lines), reply_markup=markup)
+    else:
+        bot.reply_to(msg, "\n".join(lines))
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("show:"))
+def on_show_callback(call):
+    try:
+        msg_id = int(call.data.split(":", 1)[1])
+        bot.answer_callback_query(call.id)
+        rows = sheet_get_all(REGISTRY_SHEET)
+        for row in rows[1:]:
+            if _row_message_id(row) != msg_id:
+                continue
+            row = row + [''] * max(0, 10 - len(row))
+            file_id   = row[8]
+            file_type = row[9]
+            filename  = row[3] if len(row) > 3 else row[1]
+            if not file_id:
+                bot.answer_callback_query(call.id, "Файл не найден")
+                return
+            if file_type == "photo":
+                bot.send_photo(call.message.chat.id, file_id, caption=filename)
+            else:
+                bot.send_document(call.message.chat.id, file_id, caption=filename)
+            return
+        bot.answer_callback_query(call.id, "Не найдено в реестре")
+    except Exception as e:
+        print(f"❌ show callback error: {e}", flush=True)
+        try:
+            bot.answer_callback_query(call.id, "Ошибка")
+        except Exception:
+            pass
+
+
+@bot.message_handler(commands=["chatid"])
+def on_chatid(msg):
+    cid = msg.chat.id
+    link_test = _tg_link(cid, msg.message_id)
+    bot.reply_to(msg, f"chat_id: `{cid}`\nlink test: `{link_test or '(пусто)'}`", parse_mode="Markdown")
 
 
 @bot.message_handler(commands=["start", "help"])
