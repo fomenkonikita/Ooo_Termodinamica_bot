@@ -846,14 +846,16 @@ def on_pending(msg):
     lines = ["📋 Счета к оплате:\n"]
     for n, (supplier, amount, link) in enumerate(pending, 1):
         amount_fmt = f"{amount:,.0f}".replace(",", " ")
-        line = f"{n}. {supplier} — {amount_fmt} ₽"
+        sup_escaped = supplier.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         if link:
-            line += f" · [счёт]({link})"
+            line = f'{n}. <a href="{link}">{sup_escaped}</a> — {amount_fmt} ₽'
+        else:
+            line = f"{n}. {sup_escaped} — {amount_fmt} ₽"
         lines.append(line)
 
     total_fmt = f"{total_sum:,.0f}".replace(",", " ")
     lines.append(f"\nИтого: {total_fmt} ₽")
-    bot.reply_to(msg, "\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
+    bot.reply_to(msg, "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @bot.message_handler(commands=["start", "help"])
