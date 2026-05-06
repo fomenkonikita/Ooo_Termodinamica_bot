@@ -43,7 +43,7 @@ INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номе�
                     "Примечание", "Имя отправителя", "Оплата"]
 
 REGISTRY_HEADERS = ["#", "Поставщик", "Сумма счета", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
-                    "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата"]
+                    "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата", "message_id", "Ссылка"]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
@@ -213,10 +213,11 @@ def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
     seq_num = len(rows)
     now = _now().strftime("%d.%m.%Y %H:%M")
     # A=# B=Поставщик C=Сумма D=Имя E=Статус F=Получен G=Обработан H=Ошибка
-    # I=file_id J=file_type K=chat_id L=Примечание M=Имя отправителя N=Оплата O=message_id
+    # I=file_id J=file_type K=chat_id L=Примечание M=Имя отправителя N=Оплата O=message_id P=Ссылка
+    tg_link = _tg_link(chat_id, message_id)
     sheet_append(REGISTRY_SHEET, [[
         seq_num, "", "", filename, "⏳", now, "", "", file_id, file_type,
-        str(chat_id), caption, sender_name, "", str(message_id)
+        str(chat_id), caption, sender_name, "", str(message_id), tg_link
     ]])
 
 
@@ -851,7 +852,7 @@ def on_pending(msg):
             amount = float(re.sub(r'[^\d.]', '', amount_str.replace(',', '.')))
         except Exception:
             amount = 0.0
-        link = _tg_link(_row_chat_id(row), _row_message_id(row) or 0)
+        link = row[15] if len(row) > 15 and row[15] else _tg_link(_row_chat_id(row), _row_message_id(row) or 0)
         pending.append((supplier, amount, link))
         total_sum += amount
 
