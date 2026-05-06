@@ -626,16 +626,23 @@ def _process_item(item: dict):
     except Exception as e:
         err = str(e)
         is_limit = "429" in err or "413" in err
-        is_retry = item.get("is_retry", False)
-        print(f"❌ {filename}: {err[:200]}", flush=True)
-        if row_num:
-            registry_update(row_num, "❌", err[:200])
+        print(f"{'⏳' if is_limit else '⛔'} {filename}: {err[:200]}", flush=True)
         if is_limit:
-            _react("😴")   # тихо — сообщений нет, retry каждые 20 мин, при успехе сменится на 🏆
+            if row_num:
+                registry_update(row_num, "❌", err[:200])   # ❌ = будет ретраиться
+            _react("😴")
         else:
+            if row_num:
+                registry_update(row_num, "⛔", err[:200])   # ⛔ = не ретраить
             _react("🤬")
             try:
-                bot.send_message(chat_id, f"🤬 Не удалось обработать «{filename}»\nОшибка: {err[:150]}")
+                markup = telebot.types.InlineKeyboardMarkup()
+                markup.add(telebot.types.InlineKeyboardButton(
+                    "🗑 Игнорировать этот файл", callback_data=f"ignore:{message_id}"
+                ))
+                bot.send_message(chat_id,
+                    f"Не могу распознать счёт «{filename}»",
+                    reply_markup=markup)
             except Exception:
                 pass
 
@@ -717,6 +724,39 @@ def mark_paid(message_id: int, chat_id: int, paid: bool):
         print(f"⚠️ mark_paid: message_id={message_id} не найден в реестре", flush=True)
     except Exception as e:
         print(f"❌ mark_paid error: {e}", flush=True)
+
+
+def mark_ignored(message_id: int):
+    try:
+        rows = sheet_get_all(REGISTRY_SHEET)
+        for i, row in enumerate(rows[1:], start=2):
+            if _row_message_id(row) != message_id:
+                continue
+            filename = row[3] if len(row) > 3 else row[1]
+            sheet_update_cell(REGISTRY_SHEET, i, 5, "🚫")
+            print(f"🚫 {filename} проигнорирован", flush=True)
+            return
+        print(f"⚠️ mark_ignored: message_id={message_id} не найден", flush=True)
+    except Exception as e:
+        print(f"❌ mark_ignored error: {e}", flush=True)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ignore:"))
+def on_ignore_callback(call):
+    try:
+        msg_id = int(call.data.split(":", 1)[1])
+        Thread(target=mark_ignored, args=(msg_id,), daemon=True).start()
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"🚫 Файл проигнорирован",
+            call.message.chat.id, call.message.id
+        )
+    except Exception as e:
+        print(f"❌ ignore callback error: {e}", flush=True)
+        try:
+            bot.answer_callback_query(call.id, "Ошибка")
+        except Exception:
+            pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith(("pay:", "unpay:")))
