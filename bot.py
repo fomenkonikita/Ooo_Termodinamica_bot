@@ -362,6 +362,12 @@ EXTRACT_PROMPT = """Ты парсер счетов-фактур и наклад�
 - Если поле неизвестно — пустая строка или 0"""
 
 
+_INVALID_ESCAPE_RE = re.compile(r'\\([^"\\/bfnrtu])')
+
+def _sanitize_json(s: str) -> str:
+    """Заменяет невалидные escape-последовательности (\\т, \\С и т.п.) на двойной слеш."""
+    return _INVALID_ESCAPE_RE.sub(r'\\\\\1', s)
+
 def extract_json(text: str) -> dict:
     start = text.find("{")
     if start == -1:
@@ -373,7 +379,11 @@ def extract_json(text: str) -> dict:
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                return json.loads(text[start:i + 1])
+                raw = text[start:i + 1]
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    return json.loads(_sanitize_json(raw))
     raise ValueError("Незакрытый JSON")
 
 
@@ -593,15 +603,12 @@ def _process_item(item: dict):
     except Exception as e:
         err = str(e)
         is_limit = "429" in err or "413" in err
+        is_retry = item.get("is_retry", False)
         print(f"❌ {filename}: {err[:200]}", flush=True)
         if row_num:
             registry_update(row_num, "❌", err[:200])
         if is_limit:
-            _react("😴")
-            try:
-                bot.send_message(chat_id, f"😴 Лимит запросов — «{filename}» повторю через 20 мин.")
-            except Exception:
-                pass
+            _react("😴")   # тихо — сообщений нет, retry каждые 20 мин, при успехе сменится на 🏆
         else:
             _react("🤬")
             try:
@@ -641,6 +648,7 @@ def retry_failed_invoices():
             "caption":     row[9],
             "sender_name": row[10],
             "row_num":     i,
+            "is_retry":    True,
         }
         _invoice_queue.put(item)
         count += 1
