@@ -616,10 +616,11 @@ def _process_item(item: dict):
             text = (f"«{filename}»\n"
                     f"Поставщик: {supplier}\n"
                     f"Сумма: {total_str} ₽")
-            markup = telebot.types.InlineKeyboardMarkup()
-            markup.add(telebot.types.InlineKeyboardButton(
-                "💰 Отметить оплаченным", callback_data=f"pay:{message_id}"
-            ))
+            markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+            markup.row(
+                telebot.types.InlineKeyboardButton("💰 Отметить оплаченным", callback_data=f"pay:{message_id}"),
+                telebot.types.InlineKeyboardButton("⏳ Оплатить позже", callback_data=f"later:{message_id}"),
+            )
             bot.send_message(chat_id, text, reply_markup=markup)
         except Exception as ex:
             print(f"⚠️ send pay button error: {ex}", flush=True)
@@ -708,9 +709,9 @@ def _row_message_id(row: list):
     return None
 
 
-def mark_paid(message_id: int, chat_id: int, paid: bool):
+def _set_payment_status(message_id: int, value: str, label: str):
+    """Универсальная запись статуса оплаты в реестр и счета."""
     try:
-        value = "✅" if paid else ""
         rows = sheet_get_all(REGISTRY_SHEET)
         for i, row in enumerate(rows[1:], start=2):
             if _row_message_id(row) != message_id:
@@ -719,11 +720,26 @@ def mark_paid(message_id: int, chat_id: int, paid: bool):
             sheet_update_cell(REGISTRY_SHEET, i, 14, value)   # N = Оплата
             for j in invoices_find_rows(filename):
                 sheet_update_cell(INVOICES_SHEET, j, 17, value)   # Q = Оплата
-            print(f"💰 {filename} {'оплачен ✅' if paid else 'снята отметка оплаты'}", flush=True)
+            print(f"💰 {filename} → {label}", flush=True)
             return
-        print(f"⚠️ mark_paid: message_id={message_id} не найден в реестре", flush=True)
+        print(f"⚠️ payment status: message_id={message_id} не найден", flush=True)
     except Exception as e:
-        print(f"❌ mark_paid error: {e}", flush=True)
+        print(f"❌ payment status error: {e}", flush=True)
+
+
+def mark_paid(message_id: int, chat_id: int, paid: bool):
+    _set_payment_status(message_id, "✅" if paid else "", "оплачен ✅" if paid else "снята отметка")
+
+
+def mark_later(message_id: int):
+    _set_payment_status(message_id, "⏳", "отложен ⏳")
+
+
+def _tg_link(chat_id: int, message_id: int) -> str:
+    cid = str(chat_id)
+    if cid.startswith("-100"):
+        return f"https://t.me/c/{cid[4:]}/{message_id}"
+    return ""
 
 
 def mark_ignored(message_id: int):
@@ -759,6 +775,26 @@ def on_ignore_callback(call):
             pass
 
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("later:"))
+def on_later_callback(call):
+    try:
+        msg_id = int(call.data.split(":", 1)[1])
+        Thread(target=mark_later, args=(msg_id,), daemon=True).start()
+        bot.answer_callback_query(call.id)
+        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+        markup.row(
+            telebot.types.InlineKeyboardButton("💰 Отметить оплаченным", callback_data=f"pay:{msg_id}"),
+            telebot.types.InlineKeyboardButton("✓ Отложено", callback_data=f"later:{msg_id}"),
+        )
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.id, reply_markup=markup)
+    except Exception as e:
+        print(f"❌ later callback error: {e}", flush=True)
+        try:
+            bot.answer_callback_query(call.id, "Ошибка")
+        except Exception:
+            pass
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith(("pay:", "unpay:")))
 def on_pay_callback(call):
     try:
@@ -766,7 +802,7 @@ def on_pay_callback(call):
         msg_id = int(msg_id_str)
         paid = action == "pay"
         Thread(target=mark_paid, args=(msg_id, call.message.chat.id, paid), daemon=True).start()
-        bot.answer_callback_query(call.id)  # сначала убираем спиннер
+        bot.answer_callback_query(call.id)
         new_action = "unpay" if paid else "pay"
         new_label  = "✅ Оплачено" if paid else "💰 Отметить оплаченным"
         markup = telebot.types.InlineKeyboardMarkup()
@@ -781,6 +817,43 @@ def on_pay_callback(call):
 
 
 # ── Telegram handlers ──────────────────────────────────────────────────────────
+
+
+@bot.message_handler(commands=["pending"])
+def on_pending(msg):
+    rows = sheet_get_all(REGISTRY_SHEET)
+    pending = []
+    total_sum = 0.0
+    for row in rows[1:]:
+        row = row + [''] * max(0, 15 - len(row))
+        if row[13] != "⏳":
+            continue
+        supplier = row[1] or "—"
+        amount_str = row[2] or "0"
+        try:
+            amount = float(re.sub(r'[^\d.]', '', amount_str.replace(',', '.')))
+        except Exception:
+            amount = 0.0
+        chat_id_val = int(row[10]) if row[10] else 0
+        link = _tg_link(chat_id_val, _row_message_id(row) or 0)
+        pending.append((supplier, amount, link))
+        total_sum += amount
+
+    if not pending:
+        bot.reply_to(msg, "Нет счетов, отложенных на потом.")
+        return
+
+    lines = ["📋 Счета к оплате:\n"]
+    for n, (supplier, amount, link) in enumerate(pending, 1):
+        amount_fmt = f"{amount:,.0f}".replace(",", " ")
+        line = f"{n}. {supplier} — {amount_fmt} ₽"
+        if link:
+            line += f" · [счёт]({link})"
+        lines.append(line)
+
+    total_fmt = f"{total_sum:,.0f}".replace(",", " ")
+    lines.append(f"\nИтого: {total_fmt} ₽")
+    bot.reply_to(msg, "\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
 
 
 @bot.message_handler(commands=["start", "help"])
@@ -924,6 +997,7 @@ if __name__ == "__main__":
     bot.set_my_commands([
         telebot.types.BotCommand("/start", "Информация и ссылка на таблицу"),
         telebot.types.BotCommand("/retry", "Повторить обработку счетов с ошибками"),
+        telebot.types.BotCommand("/pending", "Список счетов отложенных на оплату"),
     ])
 
     Thread(target=_queue_worker, daemon=True).start()
