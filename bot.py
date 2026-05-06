@@ -703,10 +703,27 @@ def _row_message_id(row: list):
         val = row[idx]
         if val:
             try:
-                return int(val)
+                n = int(val)
+                if n > 0:  # message_id всегда положительный
+                    return n
             except (ValueError, TypeError):
                 pass
     return None
+
+
+def _row_chat_id(row: list) -> int:
+    """Возвращает chat_id. Новый: idx 10, старый: idx 8. chat_id групп всегда отрицательный."""
+    row = row + [''] * max(0, 15 - len(row))
+    for idx in (10, 8):
+        val = row[idx]
+        if val:
+            try:
+                n = int(val)
+                if n < 0:
+                    return n
+            except (ValueError, TypeError):
+                pass
+    return 0
 
 
 def _set_payment_status(message_id: int, value: str, label: str):
@@ -834,8 +851,7 @@ def on_pending(msg):
             amount = float(re.sub(r'[^\d.]', '', amount_str.replace(',', '.')))
         except Exception:
             amount = 0.0
-        chat_id_val = int(row[10]) if row[10] else 0
-        link = _tg_link(chat_id_val, _row_message_id(row) or 0)
+        link = _tg_link(_row_chat_id(row), _row_message_id(row) or 0)
         pending.append((supplier, amount, link))
         total_sum += amount
 
