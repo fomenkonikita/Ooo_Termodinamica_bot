@@ -39,7 +39,7 @@ INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номе�
                     "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете",
                     "Примечание", "Имя отправителя", "Оплата"]
 
-REGISTRY_HEADERS = ["#", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
+REGISTRY_HEADERS = ["#", "Поставщик", "Сумма счета", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
                     "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата"]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -142,17 +142,17 @@ def ensure_sheets():
     rows = sheet_get_all(REGISTRY_SHEET)
     recovered = 0
     for i, row in enumerate(rows[1:], start=2):
-        row = row + [''] * max(0, 13 - len(row))
-        if row[2] not in ("⏳", "⚙️"):
+        row = row + [''] * max(0, 15 - len(row))
+        if row[4] not in ("⏳", "⚙️"):
             continue
         item = {
-            "filename":    row[1],
-            "file_id":     row[6],
-            "file_type":   row[7],
-            "chat_id":     int(row[8]) if row[8] else 0,
+            "filename":    row[3],
+            "file_id":     row[8],
+            "file_type":   row[9],
+            "chat_id":     int(row[10]) if row[10] else 0,
             "message_id":  _row_message_id(row),
-            "caption":     row[9],
-            "sender_name": row[10],
+            "caption":     row[11],
+            "sender_name": row[12],
             "row_num":     i,
         }
         _invoice_queue.put(item)
@@ -199,7 +199,7 @@ def sheet_update_cell(sheet: str, row: int, col: int, value: str):
 def registry_find_row(filename: str) -> int | None:
     rows = sheet_get_all(REGISTRY_SHEET)
     for i, row in enumerate(rows[1:], start=2):
-        if len(row) > 1 and row[1] == filename:
+        if len(row) > 3 and row[3] == filename:
             return i
     return None
 
@@ -207,19 +207,27 @@ def registry_find_row(filename: str) -> int | None:
 def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
                  message_id: int, caption: str = "", sender_name: str = ""):
     rows = sheet_get_all(REGISTRY_SHEET)
-    seq_num = len(rows)   # header — строка 1; первая запись → #1, вторая → #2 ...
+    seq_num = len(rows)
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    # A=# B=Поставщик C=Сумма D=Имя E=Статус F=Получен G=Обработан H=Ошибка
+    # I=file_id J=file_type K=chat_id L=Примечание M=Имя отправителя N=Оплата O=message_id
     sheet_append(REGISTRY_SHEET, [[
-        seq_num, filename, "⏳", now, "", "", file_id, file_type,
+        seq_num, "", "", filename, "⏳", now, "", "", file_id, file_type,
         str(chat_id), caption, sender_name, "", str(message_id)
     ]])
 
 
-def registry_update(row_num: int, status: str, error: str = ""):
+def registry_update(row_num: int, status: str, error: str = "",
+                    supplier: str = "", total: str = ""):
     now = datetime.now().strftime("%d.%m.%Y %H:%M") if status == "✅" else ""
-    sheet_update_cell(REGISTRY_SHEET, row_num, 3, status)   # C = Статус
-    sheet_update_cell(REGISTRY_SHEET, row_num, 5, now)      # E = Обработан
-    sheet_update_cell(REGISTRY_SHEET, row_num, 6, error)    # F = Ошибка
+    sheet_update_cell(REGISTRY_SHEET, row_num, 5, status)   # E = Статус
+    sheet_update_cell(REGISTRY_SHEET, row_num, 7, now)      # G = Обработан
+    sheet_update_cell(REGISTRY_SHEET, row_num, 8, error)    # H = Ошибка
+    if status == "✅":
+        if supplier:
+            sheet_update_cell(REGISTRY_SHEET, row_num, 2, supplier)  # B = Поставщик
+        if total:
+            sheet_update_cell(REGISTRY_SHEET, row_num, 3, total)     # C = Сумма счета
 
 
 # ── File parsing ───────────────────────────────────────────────────────────────
@@ -592,16 +600,16 @@ def _process_item(item: dict):
         if not rows:
             raise ValueError("Позиции не найдены")
         sheet_append(INVOICES_SHEET, rows)
+        supplier = (data.get("supplier") or "—").strip()
+        total = data.get("total_amount", 0) or 0
+        try:
+            total_str = f"{float(total):,.0f}".replace(",", " ")
+        except Exception:
+            total_str = str(total)
         if row_num:
-            registry_update(row_num, "✅")
+            registry_update(row_num, "✅", supplier=supplier, total=total_str)
         _react("🏆")
         try:
-            supplier = (data.get("supplier") or "—").strip()
-            total = data.get("total_amount", 0) or 0
-            try:
-                total_str = f"{float(total):,.0f}".replace(",", " ")
-            except Exception:
-                total_str = str(total)
             text = (f"«{filename}»\n"
                     f"Поставщик: {supplier}\n"
                     f"Сумма: {total_str} ₽")
@@ -647,18 +655,18 @@ def retry_failed_invoices():
     rows = sheet_get_all(REGISTRY_SHEET)
     count = 0
     for i, row in enumerate(rows[1:], start=2):
-        row = row + [''] * max(0, 13 - len(row))
-        if row[2] != "❌":
+        row = row + [''] * max(0, 15 - len(row))
+        if row[4] != "❌":
             continue
-        sheet_update_cell(REGISTRY_SHEET, i, 3, "⏳")
+        sheet_update_cell(REGISTRY_SHEET, i, 5, "⏳")
         item = {
-            "filename":    row[1],
-            "file_id":     row[6],
-            "file_type":   row[7],
-            "chat_id":     int(row[8]) if row[8] else 0,
+            "filename":    row[3],
+            "file_id":     row[8],
+            "file_type":   row[9],
+            "chat_id":     int(row[10]) if row[10] else 0,
             "message_id":  _row_message_id(row),
-            "caption":     row[9],
-            "sender_name": row[10],
+            "caption":     row[11],
+            "sender_name": row[12],
             "row_num":     i,
             "is_retry":    True,
         }
@@ -678,10 +686,9 @@ def invoices_find_rows(filename: str) -> list:
 
 
 def _row_message_id(row: list):
-    """Возвращает message_id из строки реестра.
-    Новый формат: индекс 12 (M). Старый формат: индекс 10 (K)."""
-    row = row + [''] * max(0, 13 - len(row))
-    for idx in (12, 10):
+    """Возвращает message_id. Новый: idx 14 (O). Промежуточный: idx 12. Старый: idx 10."""
+    row = row + [''] * max(0, 15 - len(row))
+    for idx in (14, 12, 10):
         val = row[idx]
         if val:
             try:
@@ -698,8 +705,8 @@ def mark_paid(message_id: int, chat_id: int, paid: bool):
         for i, row in enumerate(rows[1:], start=2):
             if _row_message_id(row) != message_id:
                 continue
-            filename = row[1]
-            sheet_update_cell(REGISTRY_SHEET, i, 12, value)   # L = Оплата
+            filename = row[3] if len(row) > 3 else row[1]
+            sheet_update_cell(REGISTRY_SHEET, i, 14, value)   # N = Оплата
             for j in invoices_find_rows(filename):
                 sheet_update_cell(INVOICES_SHEET, j, 17, value)   # Q = Оплата
             print(f"💰 {filename} {'оплачен ✅' if paid else 'снята отметка оплаты'}", flush=True)
@@ -765,8 +772,8 @@ def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
         with _enqueue_lock:
             rows = sheet_get_all(REGISTRY_SHEET)
             for row in rows[1:]:
-                row_filename = row[1] if len(row) > 1 else row[0]
-                row_status   = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
+                row_filename = row[3] if len(row) > 3 else (row[1] if len(row) > 1 else row[0])
+                row_status   = row[4] if len(row) > 4 else (row[2] if len(row) > 2 else "")
                 if row_filename == filename and row_status in ("✅", "⏳", "⚙️"):
                     if row_status == "✅":
                         bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
