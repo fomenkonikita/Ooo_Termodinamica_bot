@@ -878,23 +878,21 @@ def on_pending(msg):
         return
 
     lines = ["📋 Счета к оплате:\n"]
-    markup = telebot.types.InlineKeyboardMarkup(row_width=3)
-    btn_row = []
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    has_buttons = False
     for n, (supplier, amount, file_id, file_type, msg_id) in enumerate(pending, 1):
         amount_fmt = f"{amount:,.0f}".replace(",", " ")
         lines.append(f"{n}. {supplier} — {amount_fmt} ₽")
-        if file_id and msg_id:
-            btn_row.append(telebot.types.InlineKeyboardButton(
-                f"📎 #{n}", callback_data=f"show:{msg_id}"
-            ))
+        if msg_id:
+            has_buttons = True
+            markup.row(
+                telebot.types.InlineKeyboardButton(f"📎 #{n} Счёт", callback_data=f"show:{msg_id}"),
+                telebot.types.InlineKeyboardButton(f"✅ #{n} Оплатить", callback_data=f"pay:{msg_id}"),
+            )
 
     total_fmt = f"{total_sum:,.0f}".replace(",", " ")
     lines.append(f"\nИтого: {total_fmt} ₽")
-    if btn_row:
-        markup.add(*btn_row)
-        bot.reply_to(msg, "\n".join(lines), reply_markup=markup)
-    else:
-        bot.reply_to(msg, "\n".join(lines))
+    bot.reply_to(msg, "\n".join(lines), reply_markup=markup if has_buttons else None)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("show:"))
