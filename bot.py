@@ -622,7 +622,7 @@ def _process_item(item: dict):
                 telebot.types.InlineKeyboardButton("💰 Отметить оплаченным", callback_data=f"pay:{message_id}"),
                 telebot.types.InlineKeyboardButton("⏳ Оплатить позже", callback_data=f"later:{message_id}"),
             )
-            bot.send_message(chat_id, text, reply_markup=markup)
+            bot.send_message(chat_id, text, reply_markup=markup, reply_to_message_id=message_id)
         except Exception as ex:
             print(f"⚠️ send pay button error: {ex}", flush=True)
     except Exception as e:
@@ -749,8 +749,17 @@ def mark_paid(message_id: int, chat_id: int, paid: bool):
     _set_payment_status(message_id, "✅" if paid else "", "оплачен ✅" if paid else "снята отметка")
 
 
-def mark_later(message_id: int):
+def mark_later(message_id: int, link: str = ""):
     _set_payment_status(message_id, "⏳", "отложен ⏳")
+    if link:
+        try:
+            rows = sheet_get_all(REGISTRY_SHEET)
+            for i, row in enumerate(rows[1:], start=2):
+                if _row_message_id(row) == message_id:
+                    sheet_update_cell(REGISTRY_SHEET, i, 16, link)  # P = Ссылка
+                    return
+        except Exception as e:
+            print(f"⚠️ mark_later link save error: {e}", flush=True)
 
 
 def _tg_link(chat_id: int, message_id: int) -> str:
@@ -797,7 +806,13 @@ def on_ignore_callback(call):
 def on_later_callback(call):
     try:
         msg_id = int(call.data.split(":", 1)[1])
-        Thread(target=mark_later, args=(msg_id,), daemon=True).start()
+        # Берём ссылку на оригинальный счёт из reply_to (бот отвечал на файл)
+        reply_to = getattr(call.message, "reply_to_message", None)
+        if reply_to:
+            link = _tg_link(call.message.chat.id, reply_to.message_id)
+        else:
+            link = _tg_link(call.message.chat.id, call.message.id)
+        Thread(target=mark_later, args=(msg_id, link), daemon=True).start()
         bot.answer_callback_query(call.id)
         markup = telebot.types.InlineKeyboardMarkup(row_width=2)
         markup.row(
