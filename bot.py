@@ -951,7 +951,7 @@ def on_start(msg):
 @bot.message_handler(commands=["retry"])
 def on_retry(msg):
     rows = sheet_get_all(REGISTRY_SHEET)
-    count = sum(1 for r in rows[1:] if len(r) > 2 and r[2] == "❌")
+    count = sum(1 for r in rows[1:] if len(r) > 4 and r[4] == "❌")
     if count == 0:
         bot.reply_to(msg, "Нет счетов с ошибками.")
         return
@@ -992,7 +992,8 @@ def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
         set_reaction(msg.chat.id, msg.message_id, "👀")
         print(f"📋 Зарегистрирован: {filename} row={row_num}", flush=True)
     except Exception as e:
-        print(f"❌ enqueue {filename}: {e}", flush=True)
+        import traceback
+        print(f"❌ enqueue {filename}: {e}\n{traceback.format_exc()}", flush=True)
         try:
             set_reaction(msg.chat.id, msg.message_id, "🤬")
             bot.send_message(msg.chat.id, f"🤬 Не удалось принять «{filename}». Отправь ещё раз.")
