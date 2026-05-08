@@ -965,6 +965,8 @@ def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
         with _enqueue_lock:
             rows = sheet_get_all(REGISTRY_SHEET)
             for row in rows[1:]:
+                if not row:
+                    continue
                 row_filename = row[3] if len(row) > 3 else (row[1] if len(row) > 1 else row[0])
                 row_status   = row[4] if len(row) > 4 else (row[2] if len(row) > 2 else "")
                 if row_filename == filename and row_status in ("✅", "⏳", "⚙️"):
