@@ -95,6 +95,8 @@ def _migrate_registry(service):
     rows = result.get("values", [])
     updates = []
     for i, row in enumerate(rows[1:], start=2):
+        if not row:
+            continue
         if len(row) >= 2 and row[1] in _STATUSES:
             updates.append({
                 "range": f"{REGISTRY_SHEET}!A{i}",
@@ -145,6 +147,8 @@ def ensure_sheets():
     rows = sheet_get_all(REGISTRY_SHEET)
     recovered = 0
     for i, row in enumerate(rows[1:], start=2):
+        if not row:
+            continue
         row = row + [''] * max(0, 15 - len(row))
         if row[4] not in ("⏳", "⚙️"):
             continue
@@ -202,6 +206,8 @@ def sheet_update_cell(sheet: str, row: int, col: int, value: str):
 def registry_find_row(filename: str) -> int | None:
     rows = sheet_get_all(REGISTRY_SHEET)
     for i, row in enumerate(rows[1:], start=2):
+        if not row:
+            continue
         if len(row) > 3 and row[3] == filename:
             return i
     return None
@@ -667,6 +673,8 @@ def retry_failed_invoices():
     rows = sheet_get_all(REGISTRY_SHEET)
     count = 0
     for i, row in enumerate(rows[1:], start=2):
+        if not row:
+            continue
         row = row + [''] * max(0, 15 - len(row))
         if row[4] != "❌":
             continue
@@ -694,7 +702,7 @@ def retry_failed_invoices():
 def invoices_find_rows(filename: str) -> list:
     rows = sheet_get_all(INVOICES_SHEET)
     return [i for i, row in enumerate(rows[1:], start=2)
-            if len(row) > 1 and row[1] == filename]
+            if row and len(row) > 1 and row[1] == filename]
 
 
 def _row_message_id(row: list):
@@ -732,7 +740,7 @@ def _set_payment_status(message_id: int, value: str, label: str):
     try:
         rows = sheet_get_all(REGISTRY_SHEET)
         for i, row in enumerate(rows[1:], start=2):
-            if _row_message_id(row) != message_id:
+            if not row or _row_message_id(row) != message_id:
                 continue
             filename = row[3] if len(row) > 3 else row[1]
             sheet_update_cell(REGISTRY_SHEET, i, 14, value)   # N = Оплата
@@ -755,7 +763,7 @@ def mark_later(message_id: int, link: str = ""):
         try:
             rows = sheet_get_all(REGISTRY_SHEET)
             for i, row in enumerate(rows[1:], start=2):
-                if _row_message_id(row) == message_id:
+                if row and _row_message_id(row) == message_id:
                     sheet_update_cell(REGISTRY_SHEET, i, 16, link)  # P = Ссылка
                     return
         except Exception as e:
@@ -773,7 +781,7 @@ def mark_ignored(message_id: int):
     try:
         rows = sheet_get_all(REGISTRY_SHEET)
         for i, row in enumerate(rows[1:], start=2):
-            if _row_message_id(row) != message_id:
+            if not row or _row_message_id(row) != message_id:
                 continue
             filename = row[3] if len(row) > 3 else row[1]
             sheet_update_cell(REGISTRY_SHEET, i, 5, "🚫")
@@ -858,6 +866,8 @@ def on_pending(msg):
     pending = []
     total_sum = 0.0
     for row in rows[1:]:
+        if not row:
+            continue
         row = row + [''] * max(0, 16 - len(row))
         if row[13] != "⏳":
             continue
@@ -902,7 +912,7 @@ def on_show_callback(call):
         bot.answer_callback_query(call.id)
         rows = sheet_get_all(REGISTRY_SHEET)
         for row in rows[1:]:
-            if _row_message_id(row) != msg_id:
+            if not row or _row_message_id(row) != msg_id:
                 continue
             row = row + [''] * max(0, 10 - len(row))
             file_id   = row[8]
