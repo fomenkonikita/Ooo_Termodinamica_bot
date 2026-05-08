@@ -928,8 +928,9 @@ def on_show_callback(call):
 @bot.message_handler(commands=["chatid"])
 def on_chatid(msg):
     cid = msg.chat.id
-    link_test = _tg_link(cid, msg.message_id)
-    bot.reply_to(msg, f"chat_id: `{cid}`\nlink test: `{link_test or '(пусто)'}`", parse_mode="Markdown")
+    chat_type = msg.chat.type
+    link = _tg_link(cid, msg.message_id)
+    bot.reply_to(msg, f"chat_id: {cid}\ntype: {chat_type}\nlink: {link or 'пусто'}")
 
 
 @bot.message_handler(commands=["start", "help"])
