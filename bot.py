@@ -636,7 +636,7 @@ def _process_item(item: dict):
             print(f"⚠️ send pay button error: {ex}", flush=True)
     except Exception as e:
         err = str(e)
-        is_limit = "429" in err or "413" in err
+        is_limit = "429" in err or "413" in err or "timed out" in err.lower() or "timeout" in err.lower() or "connection" in err.lower()
         print(f"{'⏳' if is_limit else '⛔'} {filename}: {err[:200]}", flush=True)
         if is_limit:
             if row_num:
