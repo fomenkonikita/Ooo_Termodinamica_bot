@@ -283,22 +283,25 @@ def extract_text_from_pdf(data: bytes) -> tuple[str, bool]:
     return "\n---\n".join(parts), False
 
 
-def compress_for_vision(image_bytes: bytes, max_px: int = 1024) -> bytes:
-    """Сжимает изображение перед Vision API. PDF возвращает как есть."""
+def compress_for_vision(image_bytes: bytes, max_px: int = 1400) -> bytes:
+    """Конвертирует в JPEG для Vision API. Поддерживает изображения и PDF."""
+    from PIL import Image
+    img = None
     try:
-        from PIL import Image
         img = Image.open(io.BytesIO(image_bytes))
-        if img.mode in ('RGBA', 'P', 'LA'):
-            img = img.convert('RGB')
-        if max(img.size) > max_px:
-            img.thumbnail((max_px, max_px), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=85, optimize=True)
-        compressed = buf.getvalue()
-        print(f"🗜 {len(image_bytes)//1024}KB → {len(compressed)//1024}KB", flush=True)
-        return compressed
     except Exception:
-        return image_bytes  # PDF или нечитаемый формат — без изменений
+        # PDF — рендерим первую страницу через pdfplumber
+        with pdfplumber.open(io.BytesIO(image_bytes)) as pdf:
+            img = pdf.pages[0].to_image(resolution=200).original
+    if img.mode in ('RGBA', 'P', 'LA'):
+        img = img.convert('RGB')
+    if max(img.size) > max_px:
+        img.thumbnail((max_px, max_px), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=85, optimize=True)
+    result = buf.getvalue()
+    print(f"🗜 {len(image_bytes)//1024}KB → {len(result)//1024}KB JPEG", flush=True)
+    return result
 
 
 def is_garbled_text(text: str) -> bool:
