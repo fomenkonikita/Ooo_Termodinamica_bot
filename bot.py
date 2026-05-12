@@ -78,6 +78,25 @@ def get_sheets_service():
         return _sheets_service_obj
 
 
+def _reset_sheets_service():
+    global _sheets_service_obj
+    with _sheets_lock:
+        _sheets_service_obj = None
+
+
+def _sheets_call(fn):
+    """Выполняет fn(service). При SSL/сетевой ошибке сбрасывает соединение и повторяет."""
+    try:
+        return fn(get_sheets_service())
+    except Exception as e:
+        err = str(e).lower()
+        if any(x in err for x in ("ssl", "wrong version", "connection", "timeout", "timed out")):
+            print(f"⚠️ Sheets connection error, reconnecting: {e}", flush=True)
+            _reset_sheets_service()
+            return fn(get_sheets_service())
+        raise
+
+
 _STATUSES = {"⏳", "⚙️", "✅", "❌"}
 
 
@@ -165,49 +184,43 @@ def ensure_sheets():
 
 
 def sheet_append(sheet: str, rows: list):
-    service = get_sheets_service()
-    service.spreadsheets().values().append(
+    _sheets_call(lambda s: s.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!A1",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
-    ).execute()
+    ).execute())
 
 
 def sheet_get_all(sheet: str) -> list:
-    service = get_sheets_service()
-    result = service.spreadsheets().values().get(
+    result = _sheets_call(lambda s: s.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!A:Z",
-    ).execute()
+    ).execute())
     return result.get("values", [])
 
 
 def sheet_update_cell(sheet: str, row: int, col: int, value: str):
-    service = get_sheets_service()
     col_letter = chr(ord("A") + col - 1)
-    service.spreadsheets().values().update(
+    _sheets_call(lambda s: s.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!{col_letter}{row}",
         valueInputOption="RAW",
         body={"values": [[value]]},
-    ).execute()
+    ).execute())
 
 
 def sheet_batch_update_cells(sheet: str, updates: list[tuple[int, int, str]]):
     """updates: list of (row, col, value). One API call for all."""
     if not updates:
         return
-    service = get_sheets_service()
-    data = []
-    for row, col, value in updates:
-        col_letter = chr(ord("A") + col - 1)
-        data.append({"range": f"{sheet}!{col_letter}{row}", "values": [[value]]})
-    service.spreadsheets().values().batchUpdate(
+    data = [{"range": f"{sheet}!{chr(ord('A') + col - 1)}{row}", "values": [[value]]}
+            for row, col, value in updates]
+    _sheets_call(lambda s: s.spreadsheets().values().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"valueInputOption": "RAW", "data": data},
-    ).execute()
+    ).execute())
 
 
 # ── Registry ───────────────────────────────────────────────────────────────────
