@@ -16,8 +16,7 @@ import requests
 import telebot
 from groq import Groq
 from flask import Flask, request as flask_request
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -27,9 +26,7 @@ import xlrd
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
-GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
-GOOGLE_SHEETS_REFRESH_TOKEN = os.environ["GOOGLE_SHEETS_REFRESH_TOKEN"]
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 WEBHOOK_URL = os.environ["WEBHOOK_URL"]
 PORT = int(os.environ.get("PORT", 8080))
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1tmuj1f2D2euUZlr-CXHzgkurRavF-MV8UxvjG3SIKDc")
@@ -72,14 +69,11 @@ def get_sheets_service():
     global _sheets_service_obj
     with _sheets_lock:
         if _sheets_service_obj is None:
-            creds = Credentials(
-                token=None,
-                refresh_token=GOOGLE_SHEETS_REFRESH_TOKEN,
-                client_id=GOOGLE_CLIENT_ID,
-                client_secret=GOOGLE_CLIENT_SECRET,
-                token_uri="https://oauth2.googleapis.com/token",
+            info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+            creds = service_account.Credentials.from_service_account_info(
+                info,
+                scopes=["https://www.googleapis.com/auth/spreadsheets"],
             )
-            creds.refresh(Request())
             _sheets_service_obj = build("sheets", "v4", credentials=creds)
         return _sheets_service_obj
 
