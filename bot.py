@@ -195,6 +195,21 @@ def sheet_update_cell(sheet: str, row: int, col: int, value: str):
     ).execute()
 
 
+def sheet_batch_update_cells(sheet: str, updates: list[tuple[int, int, str]]):
+    """updates: list of (row, col, value). One API call for all."""
+    if not updates:
+        return
+    service = get_sheets_service()
+    data = []
+    for row, col, value in updates:
+        col_letter = chr(ord("A") + col - 1)
+        data.append({"range": f"{sheet}!{col_letter}{row}", "values": [[value]]})
+    service.spreadsheets().values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"valueInputOption": "RAW", "data": data},
+    ).execute()
+
+
 # ── Registry ───────────────────────────────────────────────────────────────────
 
 def registry_find_row(filename: str) -> int | None:
@@ -733,17 +748,18 @@ def _row_chat_id(row: list) -> int:
 
 
 def _set_payment_status(message_id: int, value: str, label: str):
-    """Универсальная запись статуса оплаты в реестр и счета."""
+    """Универсальная запись статуса оплаты в реестр и счета. Один batch-запрос."""
     try:
         rows = sheet_get_all(REGISTRY_SHEET)
         for i, row in enumerate(rows[1:], start=2):
             if not row or _row_message_id(row) != message_id:
                 continue
             filename = row[3] if len(row) > 3 else row[1]
-            sheet_update_cell(REGISTRY_SHEET, i, 14, value)   # N = Оплата
-            for j in invoices_find_rows(filename):
-                sheet_update_cell(INVOICES_SHEET, j, 17, value)   # Q = Оплата
-            print(f"💰 {filename} → {label}", flush=True)
+            invoice_rows = invoices_find_rows(filename)
+            sheet_batch_update_cells(REGISTRY_SHEET, [(i, 14, value)])
+            if invoice_rows:
+                sheet_batch_update_cells(INVOICES_SHEET, [(j, 17, value) for j in invoice_rows])
+            print(f"💰 {filename} → {label} ({len(invoice_rows)} строк)", flush=True)
             return
         print(f"⚠️ payment status: message_id={message_id} не найден", flush=True)
     except Exception as e:
