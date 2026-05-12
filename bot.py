@@ -1106,8 +1106,15 @@ if __name__ == "__main__":
     Thread(target=_queue_worker, daemon=True).start()
     print("📋 Queue worker запущен", flush=True)
 
+    def _keepalive():
+        try:
+            requests.get(WEBHOOK_URL, timeout=10)
+        except Exception:
+            pass
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(retry_failed_invoices, "interval", minutes=20)
+    scheduler.add_job(_keepalive, "interval", minutes=10)
     scheduler.start()
 
     print("Invoice bot запущен", flush=True)
