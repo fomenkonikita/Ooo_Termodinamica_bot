@@ -1068,7 +1068,10 @@ def webhook():
     print(f"📨 update: {update_keys}", flush=True)
 
     update = telebot.types.Update.de_json(json_data)
-    Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
+    # Non-daemon for file messages: process survives SIGTERM until registry write completes
+    msg_data = json_data.get("message", {}) if json_data else {}
+    is_file = "document" in msg_data or "photo" in msg_data
+    Thread(target=bot.process_new_updates, args=([update],), daemon=not is_file).start()
     return "ok", 200
 
 
