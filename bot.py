@@ -18,6 +18,7 @@ from groq import Groq
 from flask import Flask, request as flask_request
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import pdfplumber
@@ -37,7 +38,7 @@ REGISTRY_SHEET = "Реестр"
 INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номер счёта", "Дата счёта", "Позиция в счёте",
                     "Наименование", "Артикул/Описание", "Ед.изм.", "Кол-во",
                     "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете",
-                    "Примечание", "Имя отправителя", "Оплата"]
+                    "Примечание", "Имя отправителя", "Оплата", "Файл"]
 
 REGISTRY_HEADERS = ["#", "Поставщик", "Сумма счета", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
                     "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата", "message_id", "Ссылка"]
@@ -82,6 +83,71 @@ def _reset_sheets_service():
     global _sheets_service_obj
     with _sheets_lock:
         _sheets_service_obj = None
+
+
+# ── Google Drive ────────────────────────────────────────────────────────────────
+
+_drive_service_obj = None
+_drive_lock = Lock()
+_drive_folder_id = None
+
+def get_drive_service():
+    global _drive_service_obj
+    with _drive_lock:
+        if _drive_service_obj is None:
+            info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+            creds = service_account.Credentials.from_service_account_info(
+                info,
+                scopes=["https://www.googleapis.com/auth/drive"],
+            )
+            _drive_service_obj = build("drive", "v3", credentials=creds)
+        return _drive_service_obj
+
+
+def _get_drive_folder() -> str:
+    global _drive_folder_id
+    if _drive_folder_id:
+        return _drive_folder_id
+    svc = get_drive_service()
+    res = svc.files().list(
+        q="mimeType='application/vnd.google-apps.folder' and name='Счета_Термодинамика' and trashed=false",
+        fields="files(id)",
+    ).execute()
+    files = res.get("files", [])
+    if files:
+        _drive_folder_id = files[0]["id"]
+    else:
+        folder = svc.files().create(
+            body={"name": "Счета_Термодинамика", "mimeType": "application/vnd.google-apps.folder"},
+            fields="id",
+        ).execute()
+        _drive_folder_id = folder["id"]
+        svc.permissions().create(
+            fileId=_drive_folder_id,
+            body={"type": "anyone", "role": "reader"},
+        ).execute()
+        print(f"📁 Drive folder created: {_drive_folder_id}", flush=True)
+    return _drive_folder_id
+
+
+def upload_to_drive(filename: str, file_bytes: bytes, file_type: str) -> str:
+    mime_map = {
+        "pdf":   "application/pdf",
+        "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "photo": "image/jpeg",
+    }
+    mime = mime_map.get(file_type, "application/octet-stream")
+    folder_id = _get_drive_folder()
+    svc = get_drive_service()
+    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime, resumable=False)
+    uploaded = svc.files().create(
+        body={"name": filename, "parents": [folder_id]},
+        media_body=media,
+        fields="id,webViewLink",
+    ).execute()
+    link = uploaded.get("webViewLink", "")
+    print(f"☁️ Drive: {filename} → {link}", flush=True)
+    return link
 
 
 def _sheets_call(fn):
@@ -490,7 +556,7 @@ def clean_field(val: str, fallback: str = "—") -> str:
         return fallback
     return val.strip()
 
-def invoice_to_rows(data: dict, filename: str, caption: str = "", sender_name: str = "") -> list:
+def invoice_to_rows(data: dict, filename: str, caption: str = "", sender_name: str = "", drive_link: str = "") -> list:
     today = _now().strftime("%d.%m.%Y")
     supplier = clean_field(data.get("supplier", ""))
     inv_num = clean_field(data.get("invoice_number", ""))
@@ -520,7 +586,7 @@ def invoice_to_rows(data: dict, filename: str, caption: str = "", sender_name: s
             i, filename, supplier, inv_num, inv_date,
             item.get("pos", i), item.get("name", "—"), item.get("article", ""),
             item.get("unit", "—"), qty, price, line_total,
-            today, total_amount, caption, sender_name, "",
+            today, total_amount, caption, sender_name, "", drive_link,
         ])
 
     if items_sum > 0 and (total_amount == 0 or total_amount < items_sum * 0.6):
@@ -630,8 +696,19 @@ def _process_item(item: dict):
 
     print(f"📥 {filename} ({file_type}) msg_id={message_id}", flush=True)
     try:
+        # Upload to Drive before AI processing (bytes still fresh from Telegram)
+        drive_link = ""
+        try:
+            file_bytes = download_file(file_id)
+            drive_link = upload_to_drive(filename, file_bytes, file_type)
+            del file_bytes
+            if row_num and drive_link:
+                sheet_update_cell(REGISTRY_SHEET, row_num, 16, drive_link)  # P = Ссылка
+        except Exception as de:
+            print(f"⚠️ Drive upload skipped: {de}", flush=True)
+
         data = process_file(file_id, file_type, filename)
-        rows = invoice_to_rows(data, filename, caption, sender_name)
+        rows = invoice_to_rows(data, filename, caption, sender_name, drive_link)
         if not rows:
             raise ValueError("Позиции не найдены")
         sheet_append(INVOICES_SHEET, rows)
