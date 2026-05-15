@@ -95,11 +95,16 @@ def get_drive_service():
     global _drive_service_obj
     with _drive_lock:
         if _drive_service_obj is None:
-            info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-            creds = service_account.Credentials.from_service_account_info(
-                info,
-                scopes=["https://www.googleapis.com/auth/drive"],
+            from google.oauth2.credentials import Credentials as OAuthCreds
+            from google.auth.transport.requests import Request as GRequest
+            creds = OAuthCreds(
+                token=None,
+                refresh_token=os.environ["GOOGLE_DRIVE_REFRESH_TOKEN"],
+                client_id=os.environ["GOOGLE_CLIENT_ID"],
+                client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+                token_uri="https://oauth2.googleapis.com/token",
             )
+            creds.refresh(GRequest())
             _drive_service_obj = build("drive", "v3", credentials=creds)
         return _drive_service_obj
 
