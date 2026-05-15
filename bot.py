@@ -642,8 +642,9 @@ def _bad_extraction_reason(data: dict) -> str:
     return ""
 
 
-def process_file(file_id: str, file_type: str, filename: str) -> dict:
-    file_bytes = download_file(file_id)
+def process_file(file_id: str, file_type: str, filename: str, file_bytes: bytes = None) -> dict:
+    if file_bytes is None:
+        file_bytes = download_file(file_id)
     try:
         if file_type == "pdf":
             text, is_scanned = extract_text_from_pdf(file_bytes)
@@ -701,18 +702,28 @@ def _process_item(item: dict):
 
     print(f"📥 {filename} ({file_type}) msg_id={message_id}", flush=True)
     try:
-        # Upload to Drive before AI processing (bytes still fresh from Telegram)
-        drive_link = ""
-        try:
-            file_bytes = download_file(file_id)
-            drive_link = upload_to_drive(filename, file_bytes, file_type)
-            del file_bytes
-            if row_num and drive_link:
-                sheet_update_cell(REGISTRY_SHEET, row_num, 16, drive_link)  # P = Ссылка
-        except Exception as de:
-            print(f"⚠️ Drive upload skipped: {de}", flush=True)
+        # Download once, then Drive upload + AI in parallel
+        file_bytes = download_file(file_id)
 
-        data = process_file(file_id, file_type, filename)
+        drive_link = ""
+        drive_result = {}
+
+        def _drive_upload():
+            try:
+                drive_result["link"] = upload_to_drive(filename, file_bytes, file_type)
+                if row_num and drive_result["link"]:
+                    sheet_update_cell(REGISTRY_SHEET, row_num, 16, drive_result["link"])
+            except Exception as de:
+                print(f"⚠️ Drive upload skipped: {de}", flush=True)
+
+        drive_thread = Thread(target=_drive_upload, daemon=True)
+        drive_thread.start()
+
+        data = process_file(file_id, file_type, filename, file_bytes)
+        del file_bytes
+
+        drive_thread.join(timeout=30)
+        drive_link = drive_result.get("link", "")
         rows = invoice_to_rows(data, filename, caption, sender_name, drive_link)
         if not rows:
             raise ValueError("Позиции не найдены")
