@@ -1100,7 +1100,21 @@ def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
                 row_status   = row[4] if len(row) > 4 else (row[2] if len(row) > 2 else "")
                 if row_filename == filename and row_status in ("✅", "⏳", "⚙️"):
                     if row_status == "✅":
-                        bot.reply_to(msg, f"⚠️ «{filename}» уже обработан ранее.")
+                        row = row + [''] * max(0, 16 - len(row))
+                        supplier = row[1] or "—"
+                        total    = row[2] or "?"
+                        orig_msg_id = _row_message_id(row)
+                        pay_id = orig_msg_id or msg.message_id
+                        text = (f"«{filename}»\n"
+                                f"Поставщик: {supplier}\n"
+                                f"Сумма: {total} ₽\n"
+                                f"_(уже обработан ранее)_")
+                        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+                        markup.row(
+                            telebot.types.InlineKeyboardButton("💰 Отметить оплаченным", callback_data=f"pay:{pay_id}"),
+                            telebot.types.InlineKeyboardButton("⏳ Оплатить позже", callback_data=f"later:{pay_id}"),
+                        )
+                        bot.reply_to(msg, text, reply_markup=markup, parse_mode="Markdown")
                     else:
                         bot.reply_to(msg, f"⚠️ «{filename}» уже в очереди на обработку.")
                     return
