@@ -258,7 +258,7 @@ def sheet_append(sheet: str, rows: list):
     _sheets_call(lambda s: s.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!A1",
-        valueInputOption="USER_ENTERED",
+        valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
     ).execute())
