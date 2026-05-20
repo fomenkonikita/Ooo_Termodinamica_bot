@@ -777,7 +777,14 @@ def _queue_worker():
     while True:
         item = _invoice_queue.get()
         try:
-            _process_item(item)
+            t = Thread(target=_process_item, args=(item,), daemon=True)
+            t.start()
+            t.join(timeout=180)
+            if t.is_alive():
+                row_num = item.get("row_num")
+                if row_num:
+                    registry_update(row_num, "❌", "timeout: обработка превысила 3 минуты")
+                print(f"⏱ {item['filename']} timeout — помечен ❌", flush=True)
         finally:
             _invoice_queue.task_done()
             gc.collect()
