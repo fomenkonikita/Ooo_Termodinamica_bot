@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ББ Урал Комсомол · Рентабельность</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+    padding: 24px 28px;
+  }
+
+  /* ── Шапка ────────────────────────────────────────────────────── */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #21262d;
+  }
+  .logo { display: flex; align-items: center; gap: 12px; }
+  .logo-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: linear-gradient(135deg, #4472c4, #7eaaff);
+    box-shadow: 0 0 8px #4472c488;
+  }
+  h1 { font-size: 18px; font-weight: 600; color: #f0f6fc; letter-spacing: .02em; }
+  .sub { font-size: 12px; color: #6e7681; margin-top: 2px; }
+  .updated { font-size: 12px; color: #6e7681; text-align: right; }
+
+  /* ── KPI-карточки ─────────────────────────────────────────────── */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+  .kpi {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 10px;
+    padding: 18px 20px;
+    position: relative;
+    overflow: hidden;
+  }
+  .kpi::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 2px;
+    border-radius: 10px 10px 0 0;
+  }
+  .kpi.gold::after   { background: linear-gradient(90deg,#d97706,#fcd34d); }
+  .kpi.purple::after { background: linear-gradient(90deg,#7c3aed,#a78bfa); }
+  .kpi.blue::after   { background: linear-gradient(90deg,#1d4ed8,#60a5fa); }
+  .kpi.green::after  { background: linear-gradient(90deg,#15803d,#4ade80); }
+
+  .kpi-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: #6e7681;
+    margin-bottom: 10px;
+  }
+  .kpi-value {
+    font-size: 26px;
+    font-weight: 700;
+    color: #f0f6fc;
+    line-height: 1;
+    letter-spacing: -.02em;
+  }
+  .kpi-sub {
+    font-size: 11px;
+    color: #6e7681;
+    margin-top: 6px;
+  }
+  .progress-track {
+    height: 3px;
+    background: #21262d;
+    border-radius: 2px;
+    margin-top: 14px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 1s ease;
+  }
+  .blue  .progress-fill { background: linear-gradient(90deg,#1d4ed8,#60a5fa); }
+  .green .progress-fill { background: linear-gradient(90deg,#15803d,#4ade80); }
+
+  /* ── Графики ──────────────────────────────────────────────────── */
+  .charts-row {
+    display: grid;
+    grid-template-columns: 220px 1fr 220px;
+    gap: 14px;
+  }
+  .card {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .card-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: #6e7681;
+    margin-bottom: 16px;
+  }
+  .donut-wrap {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .donut-center {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -52%);
+    text-align: center;
+    pointer-events: none;
+  }
+  .donut-pct  { font-size: 22px; font-weight: 700; color: #f0f6fc; }
+  .donut-hint { font-size: 10px; color: #6e7681; margin-top: 2px; }
+
+  .legend {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 14px;
+    width: 100%;
+  }
+  .legend-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+  }
+  .legend-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    flex-shrink: 0;
+  }
+  .legend-left { display: flex; align-items: center; color: #8b949e; }
+  .legend-val  { color: #c9d1d9; font-weight: 600; }
+
+  /* Loader */
+  .loader {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 300px;
+    color: #6e7681;
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    <div>
+      <h1>ББ Урал Комсомол</h1>
+      <div class="sub">Рентабельность объекта</div>
+    </div>
+  </div>
+  <div class="updated" id="updatedAt">Загрузка...</div>
+</header>
+
+<div id="app">
+  <div class="loader">Загрузка данных...</div>
+</div>
+
+<script>
+Chart.defaults.color = '#6e7681';
+Chart.defaults.borderColor = '#21262d';
+Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
+
+function fmt(n) {
+  if (!n && n !== 0) return '—';
+  return Math.round(n).toLocaleString('ru-RU') + ' ₽';
+}
+function fmtShort(n) {
+  if (!n && n !== 0) return '—';
+  if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(1) + ' М₽';
+  if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(0) + ' К₽';
+  return Math.round(n) + ' ₽';
+}
+
+const DONUT_BG = '#0d1117';
+
+function makeDonut(id, spent, plan, color, pctEl) {
+  const remain = Math.max(plan - spent, 0);
+  return new Chart(document.getElementById(id), {
+    type: 'doughnut',
+    data: {
+      datasets: [{
+        data: [spent, remain],
+        backgroundColor: [color, '#21262d'],
+        borderColor: [DONUT_BG, DONUT_BG],
+        borderWidth: 3,
+        hoverOffset: 4,
+      }]
+    },
+    options: {
+      cutout: '70%',
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      animation: { animateRotate: true, duration: 900 },
+    }
+  });
+}
+
+function makeBar(id, labels, spent, plans) {
+  return new Chart(document.getElementById(id), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Потрачено',
+          data: spent,
+          backgroundColor: '#1d4ed8cc',
+          borderColor: '#60a5fa',
+          borderWidth: 1,
+          borderRadius: 3,
+        },
+        {
+          label: 'Себес план',
+          data: plans,
+          backgroundColor: '#21262d',
+          borderColor: '#30363d',
+          borderWidth: 1,
+          borderRadius: 3,
+        }
+      ]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+          labels: { boxWidth: 10, font: { size: 10 }, color: '#6e7681' }
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => ' ' + Math.round(ctx.raw).toLocaleString('ru-RU') + ' ₽'
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#21262d' },
+          ticks: {
+            color: '#6e7681', font: { size: 9 },
+            callback: v => fmtShort(v)
+          }
+        },
+        y: {
+          grid: { display: false },
+          ticks: { color: '#8b949e', font: { size: 10 } }
+        }
+      }
+    }
+  });
+}
+
+async function init() {
+  let d;
+  try {
+    const r = await fetch('/api/data');
+    d = await r.json();
+  } catch(e) {
+    document.getElementById('app').innerHTML =
+      '<div class="loader">Ошибка загрузки данных</div>';
+    return;
+  }
+
+  document.getElementById('updatedAt').textContent =
+    'По состоянию на: ' + (d.updated || '—');
+
+  const mat = d.materials, rab = d.work, tot = d.total;
+
+  document.getElementById('app').innerHTML = `
+    <div class="kpi-row">
+      <div class="kpi gold">
+        <div class="kpi-label">Итого потрачено</div>
+        <div class="kpi-value" id="v-total"></div>
+        <div class="kpi-sub">материалы + монтаж</div>
+      </div>
+      <div class="kpi purple">
+        <div class="kpi-label">Прогноз маржи</div>
+        <div class="kpi-value" id="v-margin"></div>
+        <div class="kpi-sub" id="v-margin-pct"></div>
+      </div>
+      <div class="kpi blue">
+        <div class="kpi-label">Материалы закуплено</div>
+        <div class="kpi-value" id="v-mat-pct"></div>
+        <div class="kpi-sub" id="v-mat-sub"></div>
+        <div class="progress-track"><div class="progress-fill" id="pb-mat" style="width:0%"></div></div>
+      </div>
+      <div class="kpi green">
+        <div class="kpi-label">Монтаж выполнен</div>
+        <div class="kpi-value" id="v-rab-pct"></div>
+        <div class="kpi-sub" id="v-rab-sub"></div>
+        <div class="progress-track"><div class="progress-fill" id="pb-rab" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="charts-row">
+
+      <div class="card">
+        <div class="card-title">Материалы · бюджет</div>
+        <div class="donut-wrap">
+          <canvas id="cMat" width="180" height="180"></canvas>
+          <div class="donut-center">
+            <div class="donut-pct" id="d-mat-pct"></div>
+            <div class="donut-hint">закуплено</div>
+          </div>
+        </div>
+        <div class="legend">
+          <div class="legend-item">
+            <span class="legend-left"><span class="legend-dot" style="background:#1d4ed8"></span>Потрачено</span>
+            <span class="legend-val" id="d-mat-spent"></span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-left"><span class="legend-dot" style="background:#21262d;border:1px solid #444"></span>Остаток</span>
+            <span class="legend-val" id="d-mat-rem"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Разделы материалов</div>
+        <canvas id="cSec" style="max-height:260px"></canvas>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Монтаж · прогресс</div>
+        <div class="donut-wrap">
+          <canvas id="cRab" width="180" height="180"></canvas>
+          <div class="donut-center">
+            <div class="donut-pct" id="d-rab-pct"></div>
+            <div class="donut-hint">выполнено</div>
+          </div>
+        </div>
+        <div class="legend">
+          <div class="legend-item">
+            <span class="legend-left"><span class="legend-dot" style="background:#15803d"></span>Выплачено</span>
+            <span class="legend-val" id="d-rab-spent"></span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-left"><span class="legend-dot" style="background:#21262d;border:1px solid #444"></span>Остаток</span>
+            <span class="legend-val" id="d-rab-rem"></span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  `;
+
+  // KPI значения
+  document.getElementById('v-total').textContent = fmtShort(tot.spent);
+  document.getElementById('v-margin').textContent = fmtShort(tot.margin);
+  document.getElementById('v-margin-pct').textContent = tot.margin_pct.toFixed(1) + '% от ВДЦ';
+  document.getElementById('v-mat-pct').textContent = mat.pct + '%';
+  document.getElementById('v-mat-sub').textContent = fmtShort(mat.spent) + ' из ' + fmtShort(mat.seb_plan);
+  document.getElementById('v-rab-pct').textContent = rab.pct + '%';
+  document.getElementById('v-rab-sub').textContent = fmtShort(rab.spent) + ' из ' + fmtShort(rab.seb_plan);
+
+  // Прогресс-бары KPI
+  setTimeout(() => {
+    document.getElementById('pb-mat').style.width = Math.min(mat.pct, 100) + '%';
+    document.getElementById('pb-rab').style.width = Math.min(rab.pct, 100) + '%';
+  }, 100);
+
+  // Донат материалы
+  document.getElementById('d-mat-pct').textContent = mat.pct + '%';
+  document.getElementById('d-mat-spent').textContent = fmt(mat.spent);
+  document.getElementById('d-mat-rem').textContent = fmt(Math.max(mat.seb_plan - mat.spent, 0));
+  makeDonut('cMat', mat.spent, mat.seb_plan, '#1d4ed8', mat.pct);
+
+  // Донат монтаж
+  document.getElementById('d-rab-pct').textContent = rab.pct + '%';
+  document.getElementById('d-rab-spent').textContent = fmt(rab.spent);
+  document.getElementById('d-rab-rem').textContent = fmt(Math.max(rab.seb_plan - rab.spent, 0));
+  makeDonut('cRab', rab.spent, rab.seb_plan, '#15803d', rab.pct);
+
+  // Bar — разделы (только те где есть данные)
+  const secs = (mat.sections || []).filter(s => s.seb > 0 || s.spent > 0);
+  makeBar('cSec',
+    secs.map(s => s.name),
+    secs.map(s => s.spent),
+    secs.map(s => s.seb)
+  );
+}
+
+init();
+
+// Авто-обновление каждые 5 минут
+setInterval(init, 5 * 60 * 1000);
+</script>
+</body>
+</html>
