@@ -12,11 +12,13 @@ def _now():
     return datetime.utcnow() + timedelta(hours=5)
 from threading import Thread, Lock
 
+import httplib2
 import requests
 import telebot
 from groq import Groq
 from flask import Flask, request as flask_request
 from google.oauth2 import service_account
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -43,7 +45,12 @@ INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номе�
 REGISTRY_HEADERS = ["#", "Поставщик", "Сумма счета", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
                     "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата", "message_id", "Ссылка"]
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+class _BotExceptionHandler(telebot.ExceptionHandler):
+    def handle(self, exc):
+        print(f"⚠️ TeleBot exception: {exc}", flush=True)
+        return True
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN, exception_handler=_BotExceptionHandler())
 client = Groq(api_key=GROQ_API_KEY)
 app = Flask(__name__)
 
@@ -75,7 +82,8 @@ def get_sheets_service():
                 info,
                 scopes=["https://www.googleapis.com/auth/spreadsheets"],
             )
-            _sheets_service_obj = build("sheets", "v4", credentials=creds)
+            http = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
+            _sheets_service_obj = build("sheets", "v4", http=http)
         return _sheets_service_obj
 
 
@@ -96,7 +104,6 @@ def get_drive_service():
     with _drive_lock:
         if _drive_service_obj is None:
             from google.oauth2.credentials import Credentials as OAuthCreds
-            from google.auth.transport.requests import Request as GRequest
             creds = OAuthCreds(
                 token=None,
                 refresh_token=os.environ["GOOGLE_DRIVE_REFRESH_TOKEN"],
@@ -104,33 +111,54 @@ def get_drive_service():
                 client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
                 token_uri="https://oauth2.googleapis.com/token",
             )
-            creds.refresh(GRequest())
-            _drive_service_obj = build("drive", "v3", credentials=creds)
+            # AuthorizedHttp auto-refreshes token on every request — не нужно refresh() вручную
+            http = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
+            _drive_service_obj = build("drive", "v3", http=http)
         return _drive_service_obj
+
+
+def _reset_drive_service():
+    global _drive_service_obj, _drive_folder_id
+    with _drive_lock:
+        _drive_service_obj = None
+        _drive_folder_id = None  # папка тоже могла быть на старом соединении
+
+
+def _drive_call(fn):
+    """Выполняет fn(service). При сетевых/auth ошибках сбрасывает соединение и повторяет."""
+    try:
+        return fn(get_drive_service())
+    except Exception as e:
+        err = str(e).lower()
+        if any(x in err for x in ("ssl", "wrong version", "connection", "timeout", "timed out",
+                                   "401", "unauthorized", "invalid_grant")):
+            print(f"⚠️ Drive error, reconnecting: {e}", flush=True)
+            _reset_drive_service()
+            return fn(get_drive_service())
+        raise
 
 
 def _get_drive_folder() -> str:
     global _drive_folder_id
     if _drive_folder_id:
         return _drive_folder_id
-    svc = get_drive_service()
-    res = svc.files().list(
+    res = _drive_call(lambda s: s.files().list(
         q="mimeType='application/vnd.google-apps.folder' and name='Счета_Термодинамика' and trashed=false",
         fields="files(id)",
-    ).execute()
+    ).execute())
     files = res.get("files", [])
     if files:
         _drive_folder_id = files[0]["id"]
     else:
-        folder = svc.files().create(
+        folder = _drive_call(lambda s: s.files().create(
             body={"name": "Счета_Термодинамика", "mimeType": "application/vnd.google-apps.folder"},
             fields="id",
-        ).execute()
+        ).execute())
         _drive_folder_id = folder["id"]
-        svc.permissions().create(
+        _drive_call(lambda s: s.permissions().create(
             fileId=_drive_folder_id,
             body={"type": "anyone", "role": "reader"},
-        ).execute()
+        ).execute())
         print(f"📁 Drive folder created: {_drive_folder_id}", flush=True)
     return _drive_folder_id
 
@@ -143,26 +171,26 @@ def upload_to_drive(filename: str, file_bytes: bytes, file_type: str) -> str:
     }
     mime = mime_map.get(file_type, "application/octet-stream")
     folder_id = _get_drive_folder()
-    svc = get_drive_service()
     media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime, resumable=False)
-    uploaded = svc.files().create(
+    uploaded = _drive_call(lambda s: s.files().create(
         body={"name": filename, "parents": [folder_id]},
         media_body=media,
         fields="id,webViewLink",
-    ).execute()
+    ).execute())
     link = uploaded.get("webViewLink", "")
     print(f"☁️ Drive: {filename} → {link}", flush=True)
     return link
 
 
 def _sheets_call(fn):
-    """Выполняет fn(service). При SSL/сетевой ошибке сбрасывает соединение и повторяет."""
+    """Выполняет fn(service). При сетевых/auth ошибках сбрасывает соединение и повторяет."""
     try:
         return fn(get_sheets_service())
     except Exception as e:
         err = str(e).lower()
-        if any(x in err for x in ("ssl", "wrong version", "connection", "timeout", "timed out")):
-            print(f"⚠️ Sheets connection error, reconnecting: {e}", flush=True)
+        if any(x in err for x in ("ssl", "wrong version", "connection", "timeout", "timed out",
+                                   "401", "unauthorized", "invalid_grant")):
+            print(f"⚠️ Sheets error, reconnecting: {e}", flush=True)
             _reset_sheets_service()
             return fn(get_sheets_service())
         raise
@@ -323,14 +351,17 @@ def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
 def registry_update(row_num: int, status: str, error: str = "",
                     supplier: str = "", total: str = ""):
     now = _now().strftime("%d.%m.%Y %H:%M") if status == "✅" else ""
-    sheet_update_cell(REGISTRY_SHEET, row_num, 5, status)   # E = Статус
-    sheet_update_cell(REGISTRY_SHEET, row_num, 7, now)      # G = Обработан
-    sheet_update_cell(REGISTRY_SHEET, row_num, 8, error)    # H = Ошибка
+    updates = [
+        (row_num, 5, status),  # E = Статус
+        (row_num, 7, now),     # G = Обработан
+        (row_num, 8, error),   # H = Ошибка
+    ]
     if status == "✅":
         if supplier:
-            sheet_update_cell(REGISTRY_SHEET, row_num, 2, supplier)  # B = Поставщик
+            updates.append((row_num, 2, supplier))   # B = Поставщик
         if total:
-            sheet_update_cell(REGISTRY_SHEET, row_num, 3, total)     # C = Сумма счета
+            updates.append((row_num, 3, total))      # C = Сумма счета
+    sheet_batch_update_cells(REGISTRY_SHEET, updates)
 
 
 # ── File parsing ───────────────────────────────────────────────────────────────
@@ -539,19 +570,28 @@ def parse_with_ai(text: str) -> dict:
 
 def parse_image_with_ai(image_bytes: bytes) -> dict:
     b64 = base64.b64encode(image_bytes).decode()
-    resp = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": EXTRACT_PROMPT + "\n\nИзвлеки из фото счёта:"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ],
-        }],
-        max_tokens=4000,
-        temperature=0.1,
-    )
-    return extract_json(resp.choices[0].message.content.strip())
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": EXTRACT_PROMPT + "\n\nИзвлеки из фото счёта:"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ],
+                }],
+                max_tokens=4000,
+                temperature=0.1,
+            )
+            return extract_json(resp.choices[0].message.content.strip())
+        except Exception as e:
+            if ("429" in str(e) or "413" in str(e)) and attempt < 2:
+                wait = 30 * (attempt + 1)
+                print(f"⏳ Vision rate limit, жду {wait}с", flush=True)
+                time.sleep(wait)
+            else:
+                raise
 
 
 PROMPT_PLACEHOLDERS = {"название поставщика", "номер счёта", "наименование", "артикул/тип или пусто"}
@@ -609,7 +649,7 @@ def invoice_to_rows(data: dict, filename: str, caption: str = "", sender_name: s
 def download_file(file_id: str) -> bytes:
     file_info = bot.get_file(file_id)
     url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
-    return requests.get(url).content
+    return requests.get(url, timeout=60).content
 
 
 def set_reaction(chat_id: int, message_id: int, emoji: str):
