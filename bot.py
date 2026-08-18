@@ -624,10 +624,16 @@ def _repair_json(s: str) -> str:
     raise ValueError("Не удалось исправить JSON escapes")
 
 def extract_json(text: str) -> dict:
+    if not text:
+        raise ValueError("JSON не найден")
+    # gpt-oss/qwen могут обернуть ответ в <think> или markdown
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     start = text.find("{")
     if start == -1:
         raise ValueError("JSON не найден")
     depth = 0
+    last_ok = None
     for i, ch in enumerate(text[start:], start):
         if ch == "{":
             depth += 1
@@ -639,8 +645,17 @@ def extract_json(text: str) -> dict:
                     return json.loads(raw)
                 except json.JSONDecodeError as e:
                     if 'escape' in str(e).lower():
-                        return json.loads(_repair_json(raw))
-                    raise
+                        try:
+                            return json.loads(_repair_json(raw))
+                        except Exception:
+                            last_ok = raw
+                    else:
+                        last_ok = raw
+    if last_ok:
+        try:
+            return json.loads(_repair_json(last_ok))
+        except Exception:
+            pass
     raise ValueError("Незакрытый JSON")
 
 
@@ -655,11 +670,28 @@ def parse_with_ai(text: str) -> dict:
                 ],
                 max_tokens=4000,
                 temperature=0.1,
+                reasoning_effort="low",
+                include_reasoning=False,
+                response_format={"type": "json_object"},
             )
-            raw = resp.choices[0].message.content.strip()
+            raw = (resp.choices[0].message.content or "").strip()
             print(f"🤖 AI: {raw[:300]}", flush=True)
             return extract_json(raw)
         except Exception as e:
+            if ("400" in str(e) or "reasoning" in str(e).lower()) and attempt == 0:
+                print(f"⚠️ AI params fallback: {e}", flush=True)
+                resp = client.chat.completions.create(
+                    model=GROQ_MODEL_TEXT,
+                    messages=[
+                        {"role": "system", "content": EXTRACT_PROMPT},
+                        {"role": "user", "content": f"Счёт:\n\n{text[:4000]}"},
+                    ],
+                    max_tokens=4000,
+                    temperature=0.1,
+                )
+                raw = (resp.choices[0].message.content or "").strip()
+                print(f"🤖 AI: {raw[:300]}", flush=True)
+                return extract_json(raw)
             if ("429" in str(e) or "413" in str(e)) and attempt < 2:
                 wait = 30 * (attempt + 1)
                 print(f"⏳ Rate limit/size, жду {wait}с", flush=True)
@@ -683,8 +715,12 @@ def parse_image_with_ai(image_bytes: bytes) -> dict:
                 }],
                 max_tokens=4000,
                 temperature=0.1,
+                reasoning_effort="none",
+                include_reasoning=False,
             )
-            return extract_json(resp.choices[0].message.content.strip())
+            raw = (resp.choices[0].message.content or "").strip()
+            print(f"🤖 Vision: {raw[:300]}", flush=True)
+            return extract_json(raw)
         except Exception as e:
             if ("429" in str(e) or "413" in str(e)) and attempt < 2:
                 wait = 30 * (attempt + 1)
@@ -855,6 +891,11 @@ def _process_item(item: dict):
             set_reaction(chat_id, message_id, emoji)
 
     print(f"📥 {filename} ({file_type}) msg_id={message_id}", flush=True)
+    if row_num:
+        try:
+            sheet_update_cell(REGISTRY_SHEET, row_num, 5, "⚙️")
+        except Exception:
+            pass
     try:
         # Download once, then Drive upload + AI in parallel
         file_bytes = download_file(file_id)
@@ -941,9 +982,11 @@ def _queue_worker():
 
 # ── Retry ──────────────────────────────────────────────────────────────────────
 
+_SKIP_RETRY_NAMES = ("акт_сверки", "платежное_поручение", "платёжное_поручение")
+
+
 def retry_failed_invoices():
-    """Сбрасывает ❌ → ⏳ и кладёт файлы обратно в очередь.
-    Также подхватывает ⛔ с ошибкой устаревшей модели Groq (404)."""
+    """Повтор: ❌, зависшие ⏳, ⛔ из‑за 404 модели / битого JSON."""
     rows = sheet_get_all(REGISTRY_SHEET)
     count = 0
     for i, row in enumerate(rows[1:], start=2):
@@ -951,9 +994,15 @@ def retry_failed_invoices():
             continue
         row = row + [''] * max(0, REGISTRY_COLS - len(row))
         status = row[4]
-        err = row[7] if len(row) > 7 else ""
-        model_dead = status == "⛔" and "404" in err and "does not exist" in err.lower()
-        if status != "❌" and not model_dead:
+        err = (row[7] if len(row) > 7 else "") or ""
+        filename = (row[3] or "").lower()
+        if any(s in filename for s in _SKIP_RETRY_NAMES):
+            continue
+        err_l = err.lower()
+        model_fail = status == "⛔" and any(x in err_l for x in (
+            "does not exist", "незакрытый json", "json не найден", "позиции не найдены",
+        ))
+        if status != "❌" and not model_fail:
             continue
         sheet_batch_update_cells(REGISTRY_SHEET, [
             (i, 5, "⏳"),
