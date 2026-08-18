@@ -37,13 +37,21 @@ SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1tmuj1f2D2euUZlr-CXHzgkurRavF
 INVOICES_SHEET = "Счета"
 REGISTRY_SHEET = "Реестр"
 
+# Groq: llama-3.1-8b-instant и llama-4-scout сняты 16–17.08.2026
+GROQ_MODEL_TEXT = os.environ.get("GROQ_MODEL_TEXT", "openai/gpt-oss-20b")
+GROQ_MODEL_VISION = os.environ.get("GROQ_MODEL_VISION", "qwen/qwen3.6-27b")
+
 INVOICES_HEADERS = ["№", "Имя файла", "Поставщик", "Номер счёта", "Дата счёта", "Позиция в счёте",
                     "Наименование", "Артикул/Описание", "Ед.изм.", "Кол-во",
                     "Цена с НДС", "Сумма с НДС", "Дата добавления", "Общая сумма с НДС в счете",
                     "Примечание", "Имя отправителя", "Оплата", "Файл"]
 
 REGISTRY_HEADERS = ["#", "Поставщик", "Сумма счета", "Имя файла", "Статус", "Получен", "Обработан", "Ошибка",
-                    "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата", "message_id", "Ссылка"]
+                    "file_id", "file_type", "chat_id", "Примечание", "Имя отправителя", "Оплата", "message_id", "Ссылка",
+                    "Ошибка msg_id"]
+
+REGISTRY_COLS = len(REGISTRY_HEADERS)
+REGISTRY_ERR_MSG_COL = 17  # Q — id сообщения бота «Не могу распознать»
 
 class _BotExceptionHandler(telebot.ExceptionHandler):
     def handle(self, exc):
@@ -261,7 +269,7 @@ def ensure_sheets():
     for i, row in enumerate(rows[1:], start=2):
         if not row:
             continue
-        row = row + [''] * max(0, 15 - len(row))
+        row = row + [''] * max(0, REGISTRY_COLS - len(row))
         if row[4] not in ("⏳", "⚙️"):
             continue
         item = {
@@ -340,12 +348,28 @@ def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
     seq_num = len(rows)
     now = _now().strftime("%d.%m.%Y %H:%M")
     # A=# B=Поставщик C=Сумма D=Имя E=Статус F=Получен G=Обработан H=Ошибка
-    # I=file_id J=file_type K=chat_id L=Примечание M=Имя отправителя N=Оплата O=message_id P=Ссылка
+    # I=file_id J=file_type K=chat_id L=Примечание M=Имя отправителя N=Оплата O=message_id P=Ссылка Q=Ошибка msg_id
     tg_link = _tg_link(chat_id, message_id)
     sheet_append(REGISTRY_SHEET, [[
         seq_num, "", "", filename, "⏳", now, "", "", file_id, file_type,
-        str(chat_id), caption, sender_name, "", str(message_id), tg_link
+        str(chat_id), caption, sender_name, "", str(message_id), tg_link, ""
     ]])
+
+
+def registry_get_error_msg_id(row_num: int) -> int | None:
+    rows = sheet_get_all(REGISTRY_SHEET)
+    if row_num - 1 >= len(rows):
+        return None
+    row = rows[row_num - 1] + [''] * max(0, REGISTRY_COLS - len(rows[row_num - 1]))
+    val = row[REGISTRY_ERR_MSG_COL - 1].strip() if len(row) >= REGISTRY_ERR_MSG_COL else ""
+    try:
+        return int(val) if val else None
+    except ValueError:
+        return None
+
+
+def registry_set_error_msg_id(row_num: int, msg_id: int):
+    sheet_update_cell(REGISTRY_SHEET, row_num, REGISTRY_ERR_MSG_COL, str(msg_id))
 
 
 def registry_update(row_num: int, status: str, error: str = "",
@@ -366,22 +390,90 @@ def registry_update(row_num: int, status: str, error: str = "",
 
 # ── File parsing ───────────────────────────────────────────────────────────────
 
+_BANK_KEYWORDS = ("банк", "сбербанк", "втб", "тинькофф", "альфа-банк", "открытие", "бик", "р/с")
+_BUYER_KEYWORDS = ("термодинамика",)
+_BAD_INV_RE = re.compile(r'^\d{10,}$')  # р/с вместо номера счёта
+
+_COMPANY_RE = re.compile(
+    r'(?:ООО|OОО|ОБЩЕСТВО\s+С\s+ОГРАНИЧЕННОЙ\s+ОТВЕТСТВЕННОСТЬЮ|ИП|АО|ЗАО|ПАО)\s*[«"\'\"]?.{2,80}',
+    re.IGNORECASE,
+)
+_HEADER_RE = re.compile(
+    r'(?:договор[- ]?счет|счет(?:заказ)?(?:\s*на\s*оплату)?)\s*№\s*\S+',
+    re.IGNORECASE,
+)
+_SUPPLIER_LABEL_RE = re.compile(r'^поставщик\s*(?:\(исполнитель\))?\s*:', re.IGNORECASE)
+_BUYER_LABEL_RE = re.compile(r'^(?:покупатель|заказчик)\s*:', re.IGNORECASE)
+
+
+def _looks_like_company(line: str) -> bool:
+    s = (line or "").strip()
+    if len(s) < 5:
+        return False
+    low = s.lower()
+    if any(k in low for k in _BANK_KEYWORDS):
+        return False
+    if any(k in low for k in _BUYER_KEYWORDS):
+        return False
+    return bool(_COMPANY_RE.search(s))
+
+
+def _company_short_name(raw: str) -> str:
+    """Короткое название фирмы без ИНН/адреса."""
+    s = (raw or "").strip()
+    s = re.split(r',\s*ИНН\b', s, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    s = re.split(r',\s*Адрес\b', s, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    s = re.sub(r'\s+', ' ', s).strip(' ,;')
+    return s[:120]
+
+
+def _extract_supplier_from_lines(lines: list[str]) -> str:
+    """Имя поставщика: после/до метки «Поставщик:», иначе Получатель (не банк)."""
+    for i, line in enumerate(lines):
+        m = _SUPPLIER_LABEL_RE.match(line.strip())
+        if not m:
+            continue
+        after = line.strip()[m.end():].strip()
+        if _looks_like_company(after):
+            return "Поставщик: " + _company_short_name(after)
+        # В 1С/PDF часто: «ООО "…"» на предыдущей строке, «Поставщик:» — отдельно
+        if i > 0 and _looks_like_company(lines[i - 1]):
+            return "Поставщик: " + _company_short_name(lines[i - 1])
+        # Или название на следующих 1–2 строках
+        for j in range(i + 1, min(i + 3, len(lines))):
+            cand = lines[j].strip()
+            if _BUYER_LABEL_RE.match(cand) or _SUPPLIER_LABEL_RE.match(cand):
+                break
+            if _looks_like_company(cand):
+                return "Поставщик: " + _company_short_name(cand)
+    # Fallback: строка «Получатель» в платёжке (не банк)
+    for i, line in enumerate(lines):
+        if not re.search(r'получатель', line, re.IGNORECASE):
+            continue
+        after = re.split(r'получатель\s*:?', line, maxsplit=1, flags=re.IGNORECASE)[-1].strip()
+        if _looks_like_company(after):
+            return "Поставщик: " + _company_short_name(after)
+        if i > 0 and _looks_like_company(lines[i - 1]):
+            return "Поставщик: " + _company_short_name(lines[i - 1])
+    return ""
+
+
 def extract_text_from_pdf(data: bytes) -> tuple[str, bool]:
     """Один проход по PDF. Возвращает (text, is_scanned).
     is_scanned=True если текста меньше 50 символов."""
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         header_lines = []
-        supplier_line = ""
+        all_lines: list[str] = []
         table_rows = []
         total_lines = []
         total_chars = 0
         for page in pdf.pages:
             full_text = page.extract_text() or ""
             total_chars += len(full_text)
-            for line in full_text.splitlines():
-                if not supplier_line and re.search(r'^поставщик:', line, re.IGNORECASE):
-                    supplier_line = line.strip()
-                if not header_lines and re.search(r'счет[аё]?\s*(на\s*оплату)?\s*№', line, re.IGNORECASE):
+            page_lines = full_text.splitlines()
+            all_lines.extend(page_lines)
+            for line in page_lines:
+                if not header_lines and _HEADER_RE.search(line):
                     header_lines.append(line.strip())
                 if re.search(r'итого|всего к оплате|к оплате', line, re.IGNORECASE):
                     total_lines.append(line.strip())
@@ -390,11 +482,19 @@ def extract_text_from_pdf(data: bytes) -> tuple[str, bool]:
                 for table in tables:
                     for row in table:
                         if row and any(c for c in row if c and str(c).strip()):
-                            table_rows.append("\t".join(str(c).strip() if c else "" for c in row))
+                            joined = "\t".join(str(c).strip() if c else "" for c in row)
+                            # Платёжка/банк в начале таблицы путает AI — пропускаем
+                            low = joined.lower()
+                            if any(k in low for k in ("бик", "банк получателя", "сч. №", "сч.№")):
+                                continue
+                            if any(k in low for k in _BANK_KEYWORDS) and "товар" not in low:
+                                continue
+                            table_rows.append(joined)
             elif not header_lines:
                 table_rows.append(full_text[:800])
     if total_chars < 50:
         return "", True
+    supplier_line = _extract_supplier_from_lines(all_lines)
     parts = []
     if supplier_line:
         parts.append(supplier_line)
@@ -548,7 +648,7 @@ def parse_with_ai(text: str) -> dict:
     for attempt in range(3):
         try:
             resp = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model=GROQ_MODEL_TEXT,
                 messages=[
                     {"role": "system", "content": EXTRACT_PROMPT},
                     {"role": "user", "content": f"Счёт:\n\n{text[:4000]}"},
@@ -573,7 +673,7 @@ def parse_image_with_ai(image_bytes: bytes) -> dict:
     for attempt in range(3):
         try:
             resp = client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model=GROQ_MODEL_VISION,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -662,9 +762,23 @@ def set_reaction(chat_id: int, message_id: int, emoji: str):
         print(f"⚠️ Reaction error: {e}", flush=True)
 
 
-_BANK_KEYWORDS    = ("банк", "сбербанк", "втб", "тинькофф", "альфа-банк", "открытие", "бик", "р/с")
-_BUYER_KEYWORDS   = ("термодинамика",)
-_BAD_INV_RE       = re.compile(r'^\d{10,}$')   # р/с вместо номера счёта
+def delete_bot_message(chat_id: int, msg_id: int):
+    try:
+        bot.delete_message(chat_id, msg_id)
+        print(f"🗑 Удалено сообщение об ошибке msg_id={msg_id}", flush=True)
+    except Exception as e:
+        print(f"⚠️ delete_message {msg_id}: {e}", flush=True)
+
+
+def cleanup_failure_notice(chat_id: int, row_num: int | None):
+    """Удаляет сообщение «Не могу распознать» после успешной обработки."""
+    if not row_num:
+        return
+    err_msg_id = registry_get_error_msg_id(row_num)
+    if err_msg_id:
+        delete_bot_message(chat_id, err_msg_id)
+        sheet_update_cell(REGISTRY_SHEET, row_num, REGISTRY_ERR_MSG_COL, "")
+
 
 def _bad_extraction_reason(data: dict) -> str:
     """Возвращает причину если AI вернул мусор, иначе пустую строку."""
@@ -776,6 +890,7 @@ def _process_item(item: dict):
             total_str = str(total)
         if row_num:
             registry_update(row_num, "✅", supplier=supplier, total=total_str)
+        cleanup_failure_notice(chat_id, row_num)
         _react("🏆")
     except Exception as e:
         err = str(e)
@@ -794,9 +909,14 @@ def _process_item(item: dict):
                 markup.add(telebot.types.InlineKeyboardButton(
                     "🗑 Игнорировать этот файл", callback_data=f"ignore:{message_id}"
                 ))
-                bot.send_message(chat_id,
+                sent = bot.send_message(
+                    chat_id,
                     f"Не могу распознать счёт «{filename}»",
-                    reply_markup=markup)
+                    reply_markup=markup,
+                    reply_to_message_id=message_id,
+                )
+                if row_num and sent:
+                    registry_set_error_msg_id(row_num, sent.message_id)
             except Exception:
                 pass
 
@@ -822,16 +942,24 @@ def _queue_worker():
 # ── Retry ──────────────────────────────────────────────────────────────────────
 
 def retry_failed_invoices():
-    """Сбрасывает ❌ → ⏳ и кладёт файлы обратно в очередь."""
+    """Сбрасывает ❌ → ⏳ и кладёт файлы обратно в очередь.
+    Также подхватывает ⛔ с ошибкой устаревшей модели Groq (404)."""
     rows = sheet_get_all(REGISTRY_SHEET)
     count = 0
     for i, row in enumerate(rows[1:], start=2):
         if not row:
             continue
-        row = row + [''] * max(0, 15 - len(row))
-        if row[4] != "❌":
+        row = row + [''] * max(0, REGISTRY_COLS - len(row))
+        status = row[4]
+        err = row[7] if len(row) > 7 else ""
+        model_dead = status == "⛔" and "404" in err and "does not exist" in err.lower()
+        if status != "❌" and not model_dead:
             continue
-        sheet_update_cell(REGISTRY_SHEET, i, 5, "⏳")
+        sheet_batch_update_cells(REGISTRY_SHEET, [
+            (i, 5, "⏳"),
+            (i, 8, ""),
+            (i, REGISTRY_ERR_MSG_COL, ""),
+        ])
         item = {
             "filename":    row[3],
             "file_id":     row[8],
@@ -860,7 +988,7 @@ def invoices_find_rows(filename: str) -> list:
 
 def _row_message_id(row: list):
     """Возвращает message_id. Новый: idx 14 (O). Промежуточный: idx 12. Старый: idx 10."""
-    row = row + [''] * max(0, 15 - len(row))
+    row = row + [''] * max(0, REGISTRY_COLS - len(row))
     for idx in (14, 12, 10):
         val = row[idx]
         if val:
@@ -875,7 +1003,7 @@ def _row_message_id(row: list):
 
 def _row_chat_id(row: list) -> int:
     """Возвращает chat_id. Новый: idx 10, старый: idx 8. chat_id групп всегда отрицательный."""
-    row = row + [''] * max(0, 15 - len(row))
+    row = row + [''] * max(0, REGISTRY_COLS - len(row))
     for idx in (10, 8):
         val = row[idx]
         if val:
@@ -952,10 +1080,13 @@ def on_ignore_callback(call):
         msg_id = int(call.data.split(":", 1)[1])
         Thread(target=mark_ignored, args=(msg_id,), daemon=True).start()
         bot.answer_callback_query(call.id)
-        bot.edit_message_text(
-            f"🚫 Файл проигнорирован",
-            call.message.chat.id, call.message.id
-        )
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.edit_message_text(
+                "🚫 Файл проигнорирован",
+                call.message.chat.id, call.message.message_id,
+            )
     except Exception as e:
         print(f"❌ ignore callback error: {e}", flush=True)
         try:
