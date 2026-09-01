@@ -332,19 +332,44 @@ def sheet_batch_update_cells(sheet: str, updates: list[tuple[int, int, str]]):
 
 # ── Registry ───────────────────────────────────────────────────────────────────
 
-def registry_find_row(filename: str) -> int | None:
+def registry_find_row(filename: str = "", file_id: str = "", message_id: int = 0) -> int | None:
+    """Ищет строку реестра. Сначала по message_id/file_id, иначе последнее совпадение по имени."""
     rows = sheet_get_all(REGISTRY_SHEET)
-    for i, row in enumerate(rows[1:], start=2):
+    fallback = None
+    for i in range(len(rows) - 1, 0, -1):
+        row = rows[i]
         if not row:
             continue
-        if len(row) > 3 and row[3] == filename:
-            return i
+        row = row + [''] * max(0, REGISTRY_COLS - len(row))
+        if message_id and _row_message_id(row) == message_id:
+            return i + 1
+        if file_id and len(row) > 8 and row[8] == file_id:
+            return i + 1
+        if filename and len(row) > 3 and row[3] == filename:
+            fallback = i + 1
+    return fallback
+
+
+def _registry_duplicate(rows: list, file_id: str, message_id: int) -> str | None:
+    """Если тот же Telegram-файл уже в реестре — статус (⏳/⚙️/✅), иначе None.
+    Совпадение только по file_id/message_id, НЕ по имени файла."""
+    for row in reversed(rows[1:]):
+        if not row:
+            continue
+        row = row + [''] * max(0, REGISTRY_COLS - len(row))
+        if message_id and _row_message_id(row) == message_id:
+            return row[4] if len(row) > 4 else "⏳"
+        if file_id and len(row) > 8 and row[8] == file_id:
+            st = row[4] if len(row) > 4 else ""
+            if st in _STATUSES:
+                return st
     return None
 
 
 def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
-                 message_id: int, caption: str = "", sender_name: str = ""):
+                 message_id: int, caption: str = "", sender_name: str = "") -> int:
     rows = sheet_get_all(REGISTRY_SHEET)
+    row_num = len(rows) + 1
     seq_num = len(rows)
     now = _now().strftime("%d.%m.%Y %H:%M")
     # A=# B=Поставщик C=Сумма D=Имя E=Статус F=Получен G=Обработан H=Ошибка
@@ -354,6 +379,7 @@ def registry_add(filename: str, file_id: str, file_type: str, chat_id: int,
         seq_num, "", "", filename, "⏳", now, "", "", file_id, file_type,
         str(chat_id), caption, sender_name, "", str(message_id), tg_link, ""
     ]])
+    return row_num
 
 
 def registry_get_error_msg_id(row_num: int) -> int | None:
@@ -985,6 +1011,24 @@ def _queue_worker():
 _SKIP_RETRY_NAMES = ("акт_сверки", "платежное_поручение", "платёжное_поручение")
 
 
+def _parse_registry_time(s: str):
+    try:
+        return datetime.strptime((s or "").strip(), "%d.%m.%Y %H:%M")
+    except Exception:
+        return None
+
+
+def _is_stuck_pending(row: list) -> bool:
+    """⏳ дольше 15 мин — скорее всего не попал в очередь или воркер упал."""
+    row = row + [''] * max(0, REGISTRY_COLS - len(row))
+    if row[4] != "⏳":
+        return False
+    t = _parse_registry_time(row[5] if len(row) > 5 else "")
+    if not t:
+        return False
+    return (_now().replace(tzinfo=None) - t).total_seconds() > 15 * 60
+
+
 def retry_failed_invoices():
     """Повтор: ❌, зависшие ⏳, ⛔ из‑за 404 модели / битого JSON."""
     rows = sheet_get_all(REGISTRY_SHEET)
@@ -1002,7 +1046,8 @@ def retry_failed_invoices():
         model_fail = status == "⛔" and any(x in err_l for x in (
             "does not exist", "незакрытый json", "json не найден", "позиции не найдены",
         ))
-        if status != "❌" and not model_fail:
+        stuck = _is_stuck_pending(row)
+        if status != "❌" and not model_fail and not stuck:
             continue
         sheet_batch_update_cells(REGISTRY_SHEET, [
             (i, 5, "⏳"),
@@ -1295,9 +1340,16 @@ def on_start(msg):
 @bot.message_handler(commands=["retry"])
 def on_retry(msg):
     rows = sheet_get_all(REGISTRY_SHEET)
-    count = sum(1 for r in rows[1:] if len(r) > 4 and r[4] == "❌")
+    count = 0
+    for r in rows[1:]:
+        if not r:
+            continue
+        r = r + [''] * max(0, REGISTRY_COLS - len(r))
+        st = r[4] if len(r) > 4 else ""
+        if st == "❌" or _is_stuck_pending(r):
+            count += 1
     if count == 0:
-        bot.reply_to(msg, "Нет счетов с ошибками.")
+        bot.reply_to(msg, "Нет счетов с ошибками или зависших в очереди.")
         return
     retry_failed_invoices()
     bot.reply_to(msg, f"↩️ Запускаю повтор для {count} счет(ов)... Результат в течение минуты.")
@@ -1308,20 +1360,19 @@ def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
     try:
         with _enqueue_lock:
             rows = sheet_get_all(REGISTRY_SHEET)
-            for row in rows[1:]:
-                if not row:
-                    continue
-                row_filename = row[3] if len(row) > 3 else (row[1] if len(row) > 1 else row[0])
-                row_status   = row[4] if len(row) > 4 else (row[2] if len(row) > 2 else "")
-                if row_filename == filename and row_status in ("✅", "⏳", "⚙️"):
-                    if row_status != "✅":
-                        bot.reply_to(msg, f"⚠️ «{filename}» уже в очереди на обработку.")
-                    return
+            dup = _registry_duplicate(rows, file_id, msg.message_id)
+            if dup:
+                if dup in ("⏳", "⚙️"):
+                    bot.reply_to(msg, f"⚠️ «{filename}» уже в очереди на обработку.")
+                elif dup == "✅":
+                    bot.reply_to(msg, f"⚠️ Этот файл уже обработан ранее. Если это другой счёт — переименуй файл.")
+                else:
+                    bot.reply_to(msg, f"⚠️ «{filename}» уже есть в реестре (статус {dup}).")
+                return
             caption     = msg.caption or ""
             sender_name = _sender_name(msg.from_user)
             print(f"📎 {filename} caption={caption!r} from={sender_name!r}", flush=True)
-            registry_add(filename, file_id, file_type, msg.chat.id, msg.message_id, caption, sender_name)
-            row_num = registry_find_row(filename)
+            row_num = registry_add(filename, file_id, file_type, msg.chat.id, msg.message_id, caption, sender_name)
             item = {
                 "filename":    filename,
                 "file_id":     file_id,
@@ -1354,6 +1405,7 @@ def on_document(msg):
     elif name.endswith((".xlsx", ".xls")):
         ftype = "excel"
     else:
+        bot.reply_to(msg, "Принимаю только PDF и Excel (.xlsx/.xls).")
         return
     enqueue_invoice(msg, doc.file_id, ftype, doc.file_name or "unknown.pdf")
 
