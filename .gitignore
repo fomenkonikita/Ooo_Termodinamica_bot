@@ -2,3 +2,6 @@ get_sheets_token.py
 __pycache__/
 *.pyc
 .env
+.env.*
+relay.local.json
+deploy/relay/relay.local.json

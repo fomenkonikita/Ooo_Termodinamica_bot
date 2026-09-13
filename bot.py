@@ -40,6 +40,14 @@ def _load_service_account_json() -> str:
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+
+# С VPS Aeza api.telegram.org по IPv4 недоступен, по IPv6 отвечает через раз.
+# TELEGRAM_API_BASE — ретранслятор на Cloudflare (deploy/relay), ходит в Telegram за нас.
+TELEGRAM_API_BASE = (os.environ.get("TELEGRAM_API_BASE") or "").rstrip("/")
+if TELEGRAM_API_BASE:
+    telebot.apihelper.API_URL = TELEGRAM_API_BASE + "/bot{0}/{1}"
+    telebot.apihelper.FILE_URL = TELEGRAM_API_BASE + "/file/bot{0}/{1}"
+
 GOOGLE_SERVICE_ACCOUNT_JSON = _load_service_account_json()
 WEBHOOK_URL = (os.environ.get("WEBHOOK_URL") or "").rstrip("/")
 PORT = int(os.environ.get("PORT", 8081))
