@@ -27,11 +27,22 @@ import pdfplumber
 import openpyxl
 import xlrd
 
+def _load_service_account_json() -> str:
+    path = (os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE") or "").strip()
+    if path:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not raw:
+        raise RuntimeError("Нужен GOOGLE_SERVICE_ACCOUNT_FILE или GOOGLE_SERVICE_ACCOUNT_JSON")
+    return raw
+
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-WEBHOOK_URL = os.environ["WEBHOOK_URL"]
-PORT = int(os.environ.get("PORT", 8080))
+GOOGLE_SERVICE_ACCOUNT_JSON = _load_service_account_json()
+WEBHOOK_URL = (os.environ.get("WEBHOOK_URL") or "").rstrip("/")
+PORT = int(os.environ.get("PORT", 8081))
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1tmuj1f2D2euUZlr-CXHzgkurRavF-MV8UxvjG3SIKDc")
 
 INVOICES_SHEET = "Счета"
@@ -262,30 +273,6 @@ def ensure_sheets():
     ).execute()
 
     _migrate_registry(service)
-
-    # Подхватываем незавершённые файлы после рестарта
-    rows = sheet_get_all(REGISTRY_SHEET)
-    recovered = 0
-    for i, row in enumerate(rows[1:], start=2):
-        if not row:
-            continue
-        row = row + [''] * max(0, REGISTRY_COLS - len(row))
-        if row[4] not in ("⏳", "⚙️"):
-            continue
-        item = {
-            "filename":    row[3],
-            "file_id":     row[8],
-            "file_type":   row[9],
-            "chat_id":     int(row[10]) if row[10] else 0,
-            "message_id":  _row_message_id(row),
-            "caption":     row[11],
-            "sender_name": row[12],
-            "row_num":     i,
-        }
-        _invoice_queue.put(item)
-        recovered += 1
-    if recovered:
-        print(f"♻️ Восстановлено {recovered} файлов из реестра", flush=True)
 
     print("✅ Таблица готова", flush=True)
 
@@ -1049,6 +1036,8 @@ def retry_failed_invoices():
         stuck = _is_stuck_pending(row)
         if status != "❌" and not model_fail and not stuck:
             continue
+        if not row[8]:
+            continue
         sheet_batch_update_cells(REGISTRY_SHEET, [
             (i, 5, "⏳"),
             (i, 8, ""),
@@ -1069,6 +1058,46 @@ def retry_failed_invoices():
         count += 1
     if count:
         print(f"🔄 Сброшено {count} файлов → очередь", flush=True)
+    return count
+
+
+def retry_unprocessed_invoices():
+    """Старт/ручной прогон: всё кроме ✅ и 🚫 (акты сверки и платёжки пропускаем)."""
+    rows = sheet_get_all(REGISTRY_SHEET)
+    count = 0
+    for i, row in enumerate(rows[1:], start=2):
+        if not row:
+            continue
+        row = row + [''] * max(0, REGISTRY_COLS - len(row))
+        status = row[4]
+        filename = (row[3] or "").lower()
+        if status in ("✅", "🚫"):
+            continue
+        if any(s in filename for s in _SKIP_RETRY_NAMES):
+            continue
+        if not row[8]:
+            print(f"⚠️ skip row {i}: нет file_id", flush=True)
+            continue
+        sheet_batch_update_cells(REGISTRY_SHEET, [
+            (i, 5, "⏳"),
+            (i, 8, ""),
+            (i, REGISTRY_ERR_MSG_COL, ""),
+        ])
+        item = {
+            "filename":    row[3],
+            "file_id":     row[8],
+            "file_type":   row[9] or "pdf",
+            "chat_id":     int(row[10]) if row[10] else 0,
+            "message_id":  _row_message_id(row),
+            "caption":     row[11],
+            "sender_name": row[12],
+            "row_num":     i,
+            "is_retry":    True,
+        }
+        _invoice_queue.put(item)
+        count += 1
+    if count:
+        print(f"🔄 В очередь на обработку: {count} файлов", flush=True)
     return count
 
 
@@ -1339,20 +1368,11 @@ def on_start(msg):
 
 @bot.message_handler(commands=["retry"])
 def on_retry(msg):
-    rows = sheet_get_all(REGISTRY_SHEET)
-    count = 0
-    for r in rows[1:]:
-        if not r:
-            continue
-        r = r + [''] * max(0, REGISTRY_COLS - len(r))
-        st = r[4] if len(r) > 4 else ""
-        if st == "❌" or _is_stuck_pending(r):
-            count += 1
+    count = retry_unprocessed_invoices()
     if count == 0:
-        bot.reply_to(msg, "Нет счетов с ошибками или зависших в очереди.")
+        bot.reply_to(msg, "Нет необработанных счетов.")
         return
-    retry_failed_invoices()
-    bot.reply_to(msg, f"↩️ Запускаю повтор для {count} счет(ов)... Результат в течение минуты.")
+    bot.reply_to(msg, f"↩️ В очереди {count} счет(ов). Результат в течение нескольких минут.")
 
 
 def enqueue_invoice(msg, file_id: str, file_type: str, filename: str):
@@ -1435,7 +1455,7 @@ def webhook():
 
 @app.route("/retry")
 def manual_retry():
-    count = retry_failed_invoices()
+    count = retry_unprocessed_invoices()
     return f"Retry triggered: {count} файлов → ⏳", 200
 
 
@@ -1465,11 +1485,6 @@ if __name__ == "__main__":
         print(f"⚠️ Sheets init error: {e}", flush=True)
 
     bot.remove_webhook()
-    bot.set_webhook(
-        url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
-        allowed_updates=["message", "callback_query"],
-    )
-    print(f"Webhook: {WEBHOOK_URL}/{TELEGRAM_TOKEN}", flush=True)
 
     bot.set_my_commands([
         telebot.types.BotCommand("/start", "Информация и ссылка на таблицу"),
@@ -1480,7 +1495,15 @@ if __name__ == "__main__":
     Thread(target=_queue_worker, daemon=True).start()
     print("📋 Queue worker запущен", flush=True)
 
+    try:
+        n = retry_unprocessed_invoices()
+        print(f"♻️ Старт: {n} необработанных в очередь", flush=True)
+    except Exception as e:
+        print(f"⚠️ retry_unprocessed: {e}", flush=True)
+
     def _keepalive():
+        if not WEBHOOK_URL:
+            return
         try:
             requests.get(WEBHOOK_URL, timeout=10)
         except Exception:
@@ -1488,8 +1511,23 @@ if __name__ == "__main__":
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(retry_failed_invoices, "interval", minutes=20)
-    scheduler.add_job(_keepalive, "interval", minutes=10)
+    if WEBHOOK_URL:
+        scheduler.add_job(_keepalive, "interval", minutes=10)
     scheduler.start()
 
     print("Invoice bot запущен", flush=True)
-    app.run(host="0.0.0.0", port=PORT)
+
+    if WEBHOOK_URL:
+        bot.set_webhook(
+            url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
+            allowed_updates=["message", "callback_query"],
+        )
+        print(f"Webhook: {WEBHOOK_URL}/{TELEGRAM_TOKEN}", flush=True)
+        app.run(host="0.0.0.0", port=PORT)
+    else:
+        def _run_flask():
+            app.run(host="0.0.0.0", port=PORT, use_reloader=False)
+
+        Thread(target=_run_flask, daemon=True).start()
+        print(f"Polling + health http://0.0.0.0:{PORT}/", flush=True)
+        bot.infinity_polling(timeout=60, long_polling_timeout=50, allowed_updates=["message", "callback_query"])
